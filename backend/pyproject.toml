@@ -1,0 +1,24 @@
+[project]
+name = "pdt21-backend"
+version = "0.1.0"
+description = "PDT2.1 minimal FastAPI backend skeleton"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "httpx>=0.28,<1.0",
+    "py-clob-client>=0.34.6,<0.35",
+    "py-clob-client-v2>=1.0.0,<2.0",
+    "python-dotenv>=1.2,<2.0",
+    "redis>=5.2,<6.0",
+    "uvicorn[standard]>=0.34,<1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9.0.3,<10.0",
+    "pytest-asyncio>=1.3,<2.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

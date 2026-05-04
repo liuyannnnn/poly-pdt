@@ -1,0 +1,197 @@
+import pytest
+from datetime import UTC, datetime, timedelta
+
+from app.listener import BroadcastHub
+from app.store import MemoryStore
+from app.timeseries import (
+    COLLECTOR_SERIES_TTL_SECONDS,
+    TEN_SECOND_SERIES_TTL_SECONDS,
+    TICK_SERIES_TTL_SECONDS,
+    append_pm_collector_snapshot,
+    append_pm_tick_snapshot,
+    resample_tick_series,
+    TimeseriesResampler,
+)
+
+
+PM_ROW = {
+    "guid": "guid-match-1",
+    "sport": "football",
+    "status": "live",
+    "start_time_utc": "2026-05-02T14:00:00Z",
+    "home_team": "Brentford FC",
+    "away_team": "West Ham United FC",
+    "pm_event_id": "394220",
+    "slug": "epl-bre-wes-2026-05-02",
+    "condition_id": "cond",
+    "score_home": 0,
+    "score_away": 0,
+    "home_bid1": 0.52,
+    "home_ask1": 0.53,
+    "draw_bid1": 0.23,
+    "draw_ask1": 0.24,
+    "away_bid1": 0.24,
+    "away_ask1": 0.25,
+    "moneyline_volume": 681362.91,
+    "total_volume": 681362.91,
+    "raw": {"game_id": 90091343},
+}
+
+
+class FastSeriesStore(MemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.append_calls: list[tuple[str, dict, int, int]] = []
+        self.get_json_calls: list[str] = []
+
+    async def append_json_list_item(self, key: str, value: dict, *, ttl_seconds: int, max_rows: int) -> None:
+        self.append_calls.append((key, value, ttl_seconds, max_rows))
+        rows = await super().get_json(key) or []
+        rows.append(value)
+        await super().set_json(key, rows[-max_rows:], ttl_seconds=ttl_seconds)
+
+    async def get_json(self, key: str):
+        self.get_json_calls.append(key)
+        return await super().get_json(key)
+
+
+def _iso_at(offset_seconds: int) -> str:
+    base = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=10)
+    return (base + timedelta(seconds=offset_seconds)).isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.asyncio
+async def test_collector_snapshot_appends_raw_collection_rows_without_grouping():
+    store = MemoryStore()
+    existing_ts = _iso_at(0)
+    first_ts = _iso_at(191)
+    second_ts = _iso_at(299)
+    await store.set_json(
+        "series:pm:collector:guid-match-1",
+        [
+            {
+                "match_id": "guid-match-1",
+                "snapshot_ts_utc": existing_ts,
+                "phase": "ALL",
+                "ingest_type": "collector_snapshot",
+                "home_ask": 0.51,
+            }
+        ],
+    )
+
+    await append_pm_collector_snapshot(
+        store,
+        "guid-match-1",
+        PM_ROW,
+        first_ts,
+    )
+    await append_pm_collector_snapshot(
+        store,
+        "guid-match-1",
+        {**PM_ROW, "home_ask1": 0.54},
+        second_ts,
+    )
+
+    rows = await store.get_json("series:pm:collector:guid-match-1")
+
+    assert len(rows) == 3
+    assert [row["snapshot_ts_utc"] for row in rows] == [
+        existing_ts,
+        first_ts,
+        second_ts,
+    ]
+    assert all("bucket_ts_utc" not in row for row in rows)
+    assert rows[2]["home_ask"] == 0.54
+    assert rows[2]["phase"] == "ALL"
+    assert rows[2]["ingest_type"] == "collector_snapshot"
+    assert await store.ttl("series:pm:collector:guid-match-1") == COLLECTOR_SERIES_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_tick_resampler_keeps_observed_tick_times_without_filling_gaps():
+    store = MemoryStore()
+    first_ts = _iso_at(2)
+    second_ts = _iso_at(6)
+    third_ts = _iso_at(22)
+    await append_pm_tick_snapshot(store, "guid-match-1", PM_ROW, first_ts)
+    await append_pm_tick_snapshot(
+        store,
+        "guid-match-1",
+        {**PM_ROW, "home_ask1": 0.55},
+        second_ts,
+    )
+    await append_pm_tick_snapshot(
+        store,
+        "guid-match-1",
+        {**PM_ROW, "home_ask1": 0.58},
+        third_ts,
+    )
+
+    summary = await resample_tick_series(store)
+    second_summary = await resample_tick_series(store)
+    rows = await store.get_json("series:pm:10s:guid-match-1")
+
+    assert summary == {"matches": 1, "rows": 2}
+    assert second_summary == {"matches": 1, "rows": 0}
+    assert [row["snapshot_ts_utc"] for row in rows] == [
+        second_ts,
+        third_ts,
+    ]
+    assert all("bucket_ts_utc" not in row for row in rows)
+    assert rows[0]["home_ask"] == 0.55
+    assert rows[1]["home_ask"] == 0.58
+    assert rows[0]["phase"] == "LIVE"
+    assert rows[0]["ingest_type"] == "market_10s"
+    assert await store.ttl("series:pm:ticks:guid-match-1") == 60
+    assert TICK_SERIES_TTL_SECONDS == 60
+    assert await store.ttl("series:pm:10s:guid-match-1") == TEN_SECOND_SERIES_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_tick_snapshot_preserves_pm_millisecond_timestamp():
+    store = MemoryStore()
+
+    await append_pm_tick_snapshot(store, "guid-match-1", PM_ROW, "1777827625004")
+
+    rows = await store.get_json("series:pm:ticks:guid-match-1")
+    assert rows[-1]["snapshot_ts_utc"] == "2026-05-03T17:00:25.004000Z"
+
+
+@pytest.mark.asyncio
+async def test_tick_snapshot_uses_fast_append_when_store_supports_it():
+    store = FastSeriesStore()
+
+    await append_pm_tick_snapshot(store, "guid-match-1", PM_ROW, _iso_at(1))
+
+    assert len(store.append_calls) == 1
+    key, row, ttl_seconds, max_rows = store.append_calls[0]
+    assert key == "series:pm:ticks:guid-match-1"
+    assert row["ingest_type"] == "market_tick"
+    assert ttl_seconds == TICK_SERIES_TTL_SECONDS
+    assert max_rows > 0
+    assert "series:pm:ticks:guid-match-1" not in store.get_json_calls
+
+
+@pytest.mark.asyncio
+async def test_timeseries_resampler_publishes_new_live_chart_rows_once():
+    store = MemoryStore()
+    hub = BroadcastHub()
+    snapshot_ts = _iso_at(2)
+    await append_pm_tick_snapshot(store, "guid-match-1", PM_ROW, snapshot_ts)
+
+    resampler = TimeseriesResampler(store=store, broadcaster=hub)
+
+    await resampler.resample_once()
+    first_messages = await hub.drain()
+    await resampler.resample_once()
+    second_messages = await hub.drain()
+
+    assert len(first_messages) == 1
+    assert first_messages[0]["topic"] == "chart.snapshot"
+    assert first_messages[0]["payload"]["match_id"] == "guid-match-1"
+    assert first_messages[0]["payload"]["snapshot_ts_utc"] == snapshot_ts
+    assert first_messages[0]["payload"]["source"] == "pm_market"
+    assert first_messages[0]["payload"]["phase"] == "LIVE"
+    assert first_messages[0]["payload"]["ingest_type"] == "market_10s"
+    assert first_messages[0]["payload"]["home_ask"] == 0.53
+    assert second_messages == []
