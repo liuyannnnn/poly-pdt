@@ -282,9 +282,6 @@ export function sortMatchesForSidebar<
     if (rankDelta !== 0) {
       return rankDelta;
     }
-    if (left.status === "Live" || left.status === "Scheduled") {
-      return getMatchTimeValue(left.startTime) - getMatchTimeValue(right.startTime);
-    }
     return getMatchTimeValue(right.startTime) - getMatchTimeValue(left.startTime);
   });
 }
@@ -340,39 +337,8 @@ export function reconcileSidebarMatchOrder<
     startTime?: Date | string;
     wsTime?: Date | string;
   }
->(previous: T[], incoming: T[]): T[] {
-  if (previous.length === 0) {
-    return sortMatchesForSidebar(incoming);
-  }
-
-  const previousById = new Map(previous.map((row, index) => [row.id, { row, index }]));
-  const promotedLive = incoming.filter((row) => {
-    const existing = previousById.get(row.id)?.row;
-    return existing && existing.status !== "Live" && row.status === "Live";
-  });
-
-  const existingStable = incoming
-    .filter((row) => previousById.has(row.id) && !promotedLive.some((item) => item.id === row.id))
-    .sort((left, right) => (previousById.get(left.id)?.index ?? 0) - (previousById.get(right.id)?.index ?? 0));
-
-  const newRows = incoming.filter((row) => !previousById.has(row.id));
-  const newLive = newRows.filter((row) => row.status === "Live");
-  const newScheduled = newRows.filter((row) => row.status === "Scheduled");
-  const newFinished = newRows.filter((row) => row.status === "Finished");
-
-  const stableLive = existingStable.filter((row) => row.status === "Live");
-  const stableScheduled = existingStable.filter((row) => row.status === "Scheduled");
-  const stableFinished = existingStable.filter((row) => row.status === "Finished");
-
-  return [
-    ...promotedLive,
-    ...stableLive,
-    ...newLive,
-    ...stableScheduled,
-    ...newScheduled,
-    ...stableFinished,
-    ...newFinished,
-  ];
+>(_previous: T[], incoming: T[]): T[] {
+  return sortMatchesForSidebar(incoming);
 }
 
 export function resolveSelectedMatchId<

@@ -238,6 +238,8 @@ class Collector:
         # 未开赛比赛只看今明两天；已经开赛但跨过本地零点的比赛仍要继续采集。
         if _float_value(pm.get("total_volume")) < self._football_volume_threshold_k * 1000:
             return False
+        if _is_finished_status(pm.get("status")) and _finished_for_more_than(pm, now_dt, minutes=15):
+            return False
         if self._upcoming_days is None:
             return True
         start = _parse_datetime(str(pm.get("start_time_utc") or ""))
@@ -525,6 +527,9 @@ def _parse_pm_match(row: dict[str, Any], updated_at: str) -> dict[str, Any]:
         "away_bid1": _price(prices, "away", "bid"),
         "raw": row,
     }
+    finished_at_utc = _source_updated_at(row)
+    if _is_finished_status(parsed["status"]) and finished_at_utc:
+        parsed["finished_at_utc"] = finished_at_utc
     home_logo_url = (row.get("team_logos") or {}).get("home") or row.get("home_logo_url")
     away_logo_url = (row.get("team_logos") or {}).get("away") or row.get("away_logo_url")
     if home_logo_url:
@@ -536,7 +541,13 @@ def _parse_pm_match(row: dict[str, Any], updated_at: str) -> dict[str, Any]:
 
 def _merge_pm_realtime_fields(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     if not previous:
+        if _is_finished_status(current.get("status")) and not current.get("finished_at_utc"):
+            current["finished_at_utc"] = current.get("updated_at_utc")
         return current
+    if previous.get("finished_at_utc") and not current.get("finished_at_utc"):
+        current["finished_at_utc"] = previous["finished_at_utc"]
+    if _is_finished_status(current.get("status")) and not current.get("finished_at_utc"):
+        current["finished_at_utc"] = current.get("updated_at_utc")
     for field in ("match_time", "period", "clock"):
         if not current.get(field) and previous.get(field):
             current[field] = previous[field]
@@ -870,3 +881,18 @@ def _is_live_status(value: Any) -> bool:
 
 def _is_finished_status(value: Any) -> bool:
     return str(value or "").strip().lower() in {"finished", "final", "ended", "closed", "complete", "completed"}
+
+
+def _source_updated_at(row: dict[str, Any]) -> str | None:
+    for key in ("finished_at_utc", "finishedAt", "updated_at_utc", "updatedAt", "updated_at"):
+        value = row.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _finished_for_more_than(pm: dict[str, Any], now_dt: datetime, *, minutes: int) -> bool:
+    finished_at = _parse_datetime(str(pm.get("finished_at_utc") or ""))
+    if finished_at is None:
+        return False
+    return now_dt - finished_at > timedelta(minutes=minutes)

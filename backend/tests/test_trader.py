@@ -136,6 +136,35 @@ async def test_buy_budget_is_dollar_amount_and_clob_quote_replaces_stale_ws_quot
 
 
 @pytest.mark.asyncio
+async def test_quote_uses_conservative_clob_and_ws_price_without_warning_on_equal_one_cent_gap():
+    store = MemoryStore()
+    await seed_market(store)
+    pm = await store.get_json("pm:match:guid-1")
+    pm.update({"home_ask1": 0.75, "home_bid1": 0.74})
+    await store.set_json("pm:match:guid-1", pm)
+    manager = TraderManager(
+        store=store,
+        clob_quote_client=FakeClobQuoteClient({"asset-home": {"ask1": 0.76, "bid1": 0.75}}),
+    )
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    api = manager.api(trading.trading_id)
+
+    buy = await api.buy("guid-1", "home", 100)
+    sell = await api.sell("guid-1", "home", buy["shares"])
+
+    assert buy["price"] == pytest.approx(0.76)
+    assert sell["price"] == pytest.approx(0.74)
+    assert not any("CLOB报价与WS差异超过0.01" in log["message"] for log in manager.get_logs(trading.trading_id))
+
+
+@pytest.mark.asyncio
 async def test_trader_ids_use_mode_letter_and_three_digit_sequence():
     manager = TraderManager(store=MemoryStore())
 
@@ -437,6 +466,105 @@ async def test_score_delay_strategy_requires_external_score_change_before_pm_sco
     pm["score_home"] = 1
     await store.set_json("pm:match:guid-1", pm)
     assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 0, 0, 1, 0)) == []
+
+
+@pytest.mark.asyncio
+async def test_score_delay_strategy_buys_draw_when_external_equalizes_before_pm():
+    store = MemoryStore()
+    await seed_market(store)
+    pm = await store.get_json("pm:match:guid-1")
+    pm.update({"score_home": 1, "score_away": 0, "draw_ask1": 0.44, "draw_bid1": 0.43})
+    await store.set_json("pm:match:guid-1", pm)
+    await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 1, "score_away": 1, "clock": "53:00"})
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"stake_usd": 100, "initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+
+    assert await football_score_delay_trade(
+        manager.api(trading.trading_id),
+        "guid-1",
+        _asa_score_event("guid-1", 1, 0, 1, 1),
+    ) == [
+        {
+            "action": "buy",
+            "guid": "guid-1",
+            "outcome_key": "draw",
+            "amount_usd": 200.0,
+            "reason": "追平买入",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_score_delay_strategy_uses_pm_score_snapshot_from_external_event_when_queue_lags():
+    store = MemoryStore()
+    await seed_market(store)
+    pm = await store.get_json("pm:match:guid-1")
+    pm.update({"score_home": 1, "score_away": 1, "draw_ask1": 0.44, "draw_bid1": 0.43})
+    await store.set_json("pm:match:guid-1", pm)
+    await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 1, "score_away": 1, "clock": "53:00"})
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+
+    event = {
+        **_asa_score_event("guid-1", 1, 0, 1, 1),
+        "pm_score_home_at_event": 1,
+        "pm_score_away_at_event": 0,
+    }
+
+    assert await football_score_delay_trade(manager.api(trading.trading_id), "guid-1", event) == [
+        {
+            "action": "buy",
+            "guid": "guid-1",
+            "outcome_key": "draw",
+            "amount_usd": 200.0,
+            "reason": "追平买入",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_score_delay_strategy_logs_when_trailing_team_scores_but_no_rule_triggers():
+    store = MemoryStore()
+    await seed_market(store)
+    pm = await store.get_json("pm:match:guid-1")
+    pm.update({"score_home": 0, "score_away": 3, "away_ask1": 0.95, "away_bid1": 0.94})
+    await store.set_json("pm:match:guid-1", pm)
+    await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 1, "score_away": 3, "clock": "75:00"})
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+
+    assert await football_score_delay_trade(
+        manager.api(trading.trading_id),
+        "guid-1",
+        _asa_score_event("guid-1", 0, 3, 1, 3),
+    ) == [
+        {
+            "action": "log",
+            "guid": "guid-1",
+            "reason": "落后方进球但领先优势仍大于1不操作",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1159,50 @@ async def test_trader_start_processes_queued_events_in_background():
         await manager.stop()
 
     assert manager.get_trades(trading.trading_id)[0]["side"] == "buy"
+
+
+@pytest.mark.asyncio
+async def test_trader_background_loop_wakes_immediately_when_event_is_enqueued():
+    store = MemoryStore()
+    await seed_market(store)
+    manager = TraderManager(store=store, process_interval_seconds=3600)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+    await manager.start()
+    try:
+        await asyncio.sleep(0.02)
+        manager.enqueue_event(_asa_score_event("guid-1", 0, 0, 1, 0))
+        await _wait_until(lambda: len(manager.get_trades(trading.trading_id)) == 1, timeout_seconds=0.3)
+    finally:
+        await manager.stop()
+
+    assert manager.get_trades(trading.trading_id)[0]["reason"] == "进球买入"
+
+
+@pytest.mark.asyncio
+async def test_trader_preserves_multiple_score_events_for_same_match():
+    manager = TraderManager(store=MemoryStore())
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+
+    manager.enqueue_event(_asa_score_event("guid-1", 0, 0, 1, 0))
+    manager.enqueue_event(_asa_score_event("guid-1", 1, 0, 2, 0))
+
+    assert manager.queue_size(trading.trading_id) == 2
 
 
 @pytest.mark.asyncio

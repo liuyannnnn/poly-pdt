@@ -180,6 +180,96 @@ def test_matches_endpoint_uses_external_update_time_when_it_is_newer_than_pm():
     assert response.json()[0]["latest_ts_utc"] == "2026-05-03T15:54:41.432764Z"
 
 
+def test_history_matches_return_newest_finished_matches_first():
+    store = MemoryStore()
+
+    async def seed() -> None:
+        await store.set_json(
+            "pm:match:guid-old",
+            {
+                "guid": "guid-old",
+                "sport": "football",
+                "league": "Premier League",
+                "home_team": "Old Home",
+                "away_team": "Old Away",
+                "start_time_utc": "2026-05-04T14:00:00Z",
+                "status": "finished",
+                "updated_at_utc": "2026-05-04T16:00:00Z",
+                "pm_event_id": "old",
+                "slug": "old-finished",
+            },
+        )
+        await store.set_json(
+            "pm:match:guid-new",
+            {
+                "guid": "guid-new",
+                "sport": "football",
+                "league": "Premier League",
+                "home_team": "New Home",
+                "away_team": "New Away",
+                "start_time_utc": "2026-05-04T19:00:00Z",
+                "status": "finished",
+                "updated_at_utc": "2026-05-04T21:00:00Z",
+                "pm_event_id": "new",
+                "slug": "new-finished",
+            },
+        )
+
+    asyncio.run(seed())
+    isolated_app = create_app(store=store, collector=Collector(store=store, pm_client=StaticPMHttpClient([])))
+
+    with TestClient(isolated_app) as client:
+        response = client.get("/api/v1/matches/history?limit=1")
+
+    assert response.status_code == 200
+    assert response.json()[0]["match_id"] == "guid-new"
+
+
+def test_active_matches_return_newest_start_time_first():
+    store = MemoryStore()
+
+    async def seed() -> None:
+        await store.set_json(
+            "pm:match:guid-earlier",
+            {
+                "guid": "guid-earlier",
+                "sport": "football",
+                "league": "Premier League",
+                "home_team": "Earlier Home",
+                "away_team": "Earlier Away",
+                "start_time_utc": "2026-05-05T10:00:00Z",
+                "status": "scheduled",
+                "updated_at_utc": "2026-05-05T09:00:00Z",
+                "pm_event_id": "earlier",
+                "slug": "earlier-active",
+            },
+        )
+        await store.set_json(
+            "pm:match:guid-later",
+            {
+                "guid": "guid-later",
+                "sport": "football",
+                "league": "Premier League",
+                "home_team": "Later Home",
+                "away_team": "Later Away",
+                "start_time_utc": "2026-05-05T12:00:00Z",
+                "status": "scheduled",
+                "updated_at_utc": "2026-05-05T09:00:00Z",
+                "pm_event_id": "later",
+                "slug": "later-active",
+            },
+        )
+
+    asyncio.run(seed())
+    isolated_app = create_app(store=store, collector=Collector(store=store, pm_client=StaticPMHttpClient([])))
+
+    with TestClient(isolated_app) as client:
+        response = client.get("/api/v1/matches")
+
+    assert response.status_code == 200
+    assert [row["match_id"] for row in response.json()] == ["guid-later", "guid-earlier"]
+
+
 def test_strategy_catalog_exposes_second_round_strategy():
     isolated_app = create_app(store=MemoryStore())
     with TestClient(isolated_app) as client:

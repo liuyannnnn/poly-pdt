@@ -644,7 +644,7 @@ async def _match_cards(
                 "binding_status": binding.get("status") or "pending",
             }
         )
-    return sorted(rows, key=lambda row: row["start_time_utc"])
+    return sorted(rows, key=lambda row: row["start_time_utc"], reverse=True)
 
 
 def _enrich_snapshot_rows(match_id: str, pm: dict[str, Any], rows: list[Any]) -> list[dict[str, Any]]:

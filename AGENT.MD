@@ -7,14 +7,14 @@
 - Python。
 - Redis。
 - PM as base。
-- GS as outsource。
+- GS/ASA as outsource。
 - Football only。
 - Existing frontend layout unchanged。
 - Frontend source comes from `pdt2.1/frontend-snapshot/`。
 
 禁止加入：
 
-- KS。
+- 当前版本不实现 KS 服务接入或真实下单。
 - TRD。
 - Basketball。
 - PostgreSQL。
@@ -41,10 +41,11 @@
 
 - PM HTTP 采集。
 - GS `home` / `d1` HTTP 采集。
-- 以 PM 为基准匹配 GS。
+- ASA HTTP 采集或查询近期足球比赛。
+- 以 PM 为基准匹配 GS/ASA。
 - 生成 `guid`。
-- 存 PM 当前态、GS 当前态、binding。
-- 设置 TTL 5 天。
+- 存 PM 当前态、GS/ASA 当前态、binding。
+- 设置比赛相关 TTL 3 天。
 
 禁止：
 
@@ -61,11 +62,14 @@
 - PM market WS。
 - PM user WS。
 - GS live WS。
+- ASA live WS。
 - 过滤非系统当前比赛。
 - 标准化实时字段。
-- 检测变化。
 - 入 Redis。
-- 推送 Trader 和前端。
+- 推送前端。
+- PM market ticks 推送交易模块行情通道。
+- PM sports/GS/ASA 比赛数据推送判别器。
+- PM user 账号、订单、成交事件按 `provider + account_alias` 推送对应交易员。
 
 禁止：
 
@@ -76,22 +80,48 @@
 
 ### Trader Agent
 
-只负责交易通用模块：
+只负责交易模块：
 
 - 模拟交易员。
 - 真实交易员 dry-run/真实路径骨架。
+- provider gateway 交易和查询接口，当前只实现 PM，后续可扩展 KS。
+- 交易员实例。
+- 策略实例。
 - 策略可调用 API。
 - 交易日志和运行日志。
 - 盘口、资产、持仓、余额查询。
 - 买入/卖出。
 - 通用约束检查。
 - 默认策略 `football_score_delay_trade`。
+- 三类隔离事件入口：
+  - market tick。
+  - match signal。
+  - account event。
 
 禁止：
 
-- 不接 PM/GS HTTP。
-- 不接 PM/GS WS。
+- 不接 PM/GS/ASA HTTP。
+- 不接 PM/GS/ASA WS。
 - 不修改前端布局。
+
+### Discriminator Component
+
+判别器不是额外 Agent，只是 Listener 和 Trader 之间的组件。
+
+只负责：
+
+- 接收 PM sports、GS、ASA 的比赛数据。
+- 记录每个 `source + guid` 的最新比赛值。
+- 对比分、点球、红黄牌等字段做简单变化检测。
+- 只把比赛变化信号推送给交易模块。
+
+禁止：
+
+- 不处理 PM market ticks。
+- 不查账户。
+- 不执行策略。
+- 不下单。
+- 不改写历史日志。
 
 ## 工作原则
 
@@ -99,18 +129,23 @@
 - 先让主链路跑通。
 - 组件边界清楚，但不要过度分层。
 - 所有 I/O 用 async。
-- PM 数据和 GS 数据逻辑独立、存储独立。
-- 必须通过 `guid` 建立 PM/GS 唯一匹配索引。
+- PM 数据和 GS/ASA 数据逻辑独立、存储独立。
+- 必须通过 `guid` 建立 PM/GS/ASA 唯一匹配索引。
 - 不能为了前端显示编造数据。
 - Strategy 只能调用 Trader API。
 - Trader 是唯一处理买入、卖出、账户、持仓、订单、成交的模块。
 - Redis 是唯一存储。
+- PM market tick 与比赛变化信号必须隔离，不能共用会按 `guid` 丢信号的队列。
+- 账号事件必须按 `provider + account_alias` 路由到对应交易员，不进入判别器、不进入策略。
+- 模拟交易员自行维护账户、持仓、交易记录；实盘交易员以 provider 查询和 user WS 回报为准。
+- 系统可配置多个 PM 账户；后续接 KS 时沿用 provider/account 路由，不改策略边界。
+- Redis 中的日志、交易记录、ALL/LIVE/ticks 时序都按追加方式写入，不回写、不补点、不拟合。
 
 ## 数据原则
 
 - raw payload 原样保存。
 - 标准化字段单独保存。
-- PM 字段和 GS 字段互不覆盖。
+- PM 字段和 GS/ASA 字段互不覆盖。
 - 凭证只放 `.env`，不进 Redis、不进日志、不进 fixture。
 
 ## 三轮开发顺序
@@ -126,14 +161,18 @@
 
 ### 第二轮：模块开发
 
-- Collector：PM/GS HTTP + guid 匹配。
-- Listener：PM/GS WS + 标准化 + 变化检测 + 推送。
-- Trader：策略 API + 约束检查 + simulation + real dry-run + 默认策略。
+- Collector：PM/GS/ASA HTTP + guid 匹配。
+- Listener：PM/GS/ASA WS + 标准化 + 入库 + 推送。
+- Discriminator：比赛数据变化检测 + match signal。
+- Trader：交易模块 + 交易员 + 策略 API + 约束检查 + simulation + real dry-run + 默认策略。
 
 ### 第三轮：集成测试
 
 - Collector -> Redis -> API。
-- Listener -> Redis -> Frontend WS -> Trader queue。
+- Listener -> Redis -> Frontend WS。
+- PM market ticks -> Trading MarketState -> Trader market tick。
+- 比赛数据 -> Discriminator -> Trader match signal。
+- PM user -> Account router -> Trader account event。
 - Trader -> Redis -> accounts/positions/trades/logs。
 - PM user WS -> account/order/fill reconciliation。
 - Redis TTL/retention。

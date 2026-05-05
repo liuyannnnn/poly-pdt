@@ -49,7 +49,7 @@ describe("groupMatchesByStatus", () => {
 });
 
 describe("sortMatchesForSidebar", () => {
-  it("orders live matches first by start time and keeps live order stable", () => {
+  it("orders sidebar cards by start time descending within each status bucket", () => {
     const rows = [
       { id: "scheduled-late", status: "Scheduled", startTime: new Date("2026-04-02T10:00:00Z") },
       { id: "live-earlier", status: "Live", wsTime: new Date("2026-04-01T10:00:00Z"), startTime: new Date("2026-04-01T09:00:00Z") },
@@ -60,17 +60,17 @@ describe("sortMatchesForSidebar", () => {
 
     const sorted = sortMatchesForSidebar(rows);
     expect(sorted.map((m) => m.id)).toEqual([
-      "live-earlier",
       "live-latest",
-      "scheduled-near",
+      "live-earlier",
       "scheduled-late",
+      "scheduled-near",
       "finished",
     ]);
   });
 });
 
 describe("reconcileSidebarMatchOrder", () => {
-  it("keeps existing order stable for unchanged live updates", () => {
+  it("re-sorts incoming cards by start time descending", () => {
     const previous = [
       { id: "live-1", status: "Live", startTime: new Date("2026-04-02T10:00:00Z") },
       { id: "live-2", status: "Live", startTime: new Date("2026-04-02T11:00:00Z") },
@@ -83,7 +83,7 @@ describe("reconcileSidebarMatchOrder", () => {
     ] as any[];
 
     const reconciled = reconcileSidebarMatchOrder(previous, incoming);
-    expect(reconciled.map((row) => row.id)).toEqual(["live-1", "live-2", "pre-1"]);
+    expect(reconciled.map((row) => row.id)).toEqual(["live-2", "live-1", "pre-1"]);
   });
 
   it("moves a pre-match to the front when it turns live", () => {

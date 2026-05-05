@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.collector import Collector, StaticGSHttpClient, StaticPMHttpClient
+from app.discriminator import MatchDiscriminator
 from app.listener import BroadcastHub, Listener
 from app.store import MemoryStore
 from app.trader import TraderManager
@@ -21,6 +22,26 @@ async def seed_store() -> tuple[MemoryStore, str]:
     return store, report["bindings"][0]["guid"]
 
 
+class SlowStreamStore(MemoryStore):
+    def __init__(self):
+        super().__init__()
+        self.stream_started = asyncio.Event()
+        self.allow_stream = asyncio.Event()
+
+    async def add_stream(self, key, value, max_len=10_000, ttl_seconds=None):
+        self.stream_started.set()
+        await self.allow_stream.wait()
+        await super().add_stream(key, value, max_len=max_len, ttl_seconds=ttl_seconds)
+
+
+class RecordingTraderManager:
+    def __init__(self):
+        self.events = []
+
+    def enqueue_event(self, event):
+        self.events.append(event)
+
+
 @pytest.mark.asyncio
 async def test_broadcast_hub_fans_out_messages_to_each_subscriber():
     hub = BroadcastHub()
@@ -36,6 +57,33 @@ async def test_broadcast_hub_fans_out_messages_to_each_subscriber():
     finally:
         first.close()
         second.close()
+
+
+@pytest.mark.asyncio
+async def test_discriminator_enqueues_trader_event_before_slow_stream_logging_finishes():
+    store = SlowStreamStore()
+    trader = RecordingTraderManager()
+    discriminator = MatchDiscriminator(store=store, trader_manager=trader)
+
+    task = asyncio.create_task(
+        discriminator.process_external_state(
+            source="asa_live",
+            guid="guid-1",
+            payload={"message_id": "asa-score-1", "pm_score_home_at_event": 0, "pm_score_away_at_event": 0},
+            previous={"score_home": 0, "score_away": 0},
+            current={"score_home": 1, "score_away": 0, "updated_at_utc": "2026-05-05T01:00:00Z"},
+            mapping={"score_home": "score_home", "score_away": "score_away"},
+            ws_message={"topic": "external.match", "payload": {"guid": "guid-1"}},
+        )
+    )
+    try:
+        await asyncio.wait_for(store.stream_started.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert len(trader.events) == 1
+        assert trader.events[0]["score_home"] == 1
+    finally:
+        store.allow_stream.set()
+        await task
 
 
 @pytest.mark.asyncio
@@ -77,7 +125,7 @@ async def test_listener_updates_pm_market_without_overwriting_gs_state_and_broad
     assert ticks[-1]["home_ask"] == 0.53
     assert ticks[-1]["draw_ask"] == 0.27
     assert ticks[-1]["away_ask"] == 0.33
-    assert await store.ttl(f"series:pm:ticks:{guid}") == 60
+    assert await store.ttl(f"series:pm:ticks:{guid}") == 24 * 60 * 60
     assert broadcasts[-1]["topic"] == "market.tick"
     assert broadcasts[-1]["payload"]["match_id"] == guid
     assert broadcasts[-1]["payload"]["outcome"] == "home"
@@ -107,6 +155,37 @@ async def test_listener_ignores_pm_market_tick_until_match_is_live():
     assert pm_match["home_ask1"] == previous["home_ask1"]
     assert await store.get_json(f"series:pm:ticks:{guid}") is None
     assert await store.get_json(f"orderbook:{guid}:home") is None
+    assert await hub.drain() == []
+
+
+@pytest.mark.asyncio
+async def test_listener_ignores_pm_market_tick_after_match_has_been_finished_for_15_minutes():
+    store, guid = await seed_store()
+    pm = await store.get_json(f"pm:match:{guid}")
+    await store.set_json(
+        f"pm:match:{guid}",
+        {
+            **pm,
+            "status": "finished",
+            "updated_at_utc": "2026-05-01T21:00:00Z",
+        },
+    )
+    hub = BroadcastHub()
+    listener = Listener(store=store, broadcaster=hub, trader_manager=TraderManager(store=store))
+
+    event = await listener.process_payload(
+        "pm_market",
+        {
+            "asset_id": "asset-ars-home",
+            "bid": 0.01,
+            "ask": 0.02,
+            "ts": "2026-05-01T21:16:00Z",
+            "message_id": "market-after-finished-1",
+        },
+    )
+
+    assert event is None
+    assert await store.get_json(f"series:pm:ticks:{guid}") is None
     assert await hub.drain() == []
 
 
@@ -165,6 +244,8 @@ async def test_listener_updates_asa_score_without_overwriting_pm_score():
     assert event is not None
     assert event["source"] == "asa_live"
     assert event["score_home"] == 1
+    assert event["pm_score_home_at_event"] == 0
+    assert event["pm_score_away_at_event"] == 0
     assert "score_home" in event["changed_fields"]
     assert asa_match["score_home"] == 1
     assert asa_match["clock"] == "35"
@@ -512,6 +593,31 @@ async def test_discriminator_logs_first_known_score_when_previous_score_is_missi
 
     assert [row["event_kind"] for row in match_logs] == ["score_changed"]
     assert match_logs[0]["message"] == "比分 2-0"
+
+
+@pytest.mark.asyncio
+async def test_discriminator_logs_pm_start_and_finish_status_but_not_break_status():
+    store = MemoryStore()
+    listener = Listener(store=store, broadcaster=BroadcastHub())
+
+    for previous, current in [
+        ({"status": "scheduled"}, {"status": "live", "updated_at_utc": "2026-05-02T14:00:00Z"}),
+        ({"status": "live"}, {"status": "Break", "updated_at_utc": "2026-05-02T14:45:00Z"}),
+        ({"status": "live"}, {"status": "finished", "updated_at_utc": "2026-05-02T15:50:00Z"}),
+    ]:
+        await listener._discriminator.process_external_state(
+            source="pm_sports",
+            guid="guid-match-1",
+            payload={},
+            previous=previous,
+            current=current,
+            mapping={"status": "status"},
+            ws_message={"type": "match.update", "match": {"guid": "guid-match-1"}},
+        )
+
+    match_logs = await store.stream("stream:match_logs")
+
+    assert [row["message"] for row in match_logs] == ["比赛状态 live", "比赛状态 finished"]
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ PROCESS_LOG_FIELDS = {
 DISPLAY_PROCESS_LOG_FIELDS = {
     "score_home",
     "score_away",
+    "status",
     "penalties",
 }
 
@@ -55,6 +56,7 @@ class MatchDiscriminator:
             return None
         event = await self._standard_event(source, guid, payload, changed, current, previous)
         self._enqueue_trader(event)
+        await self._write_standard_event(event)
         return event
 
     async def process_external_state(
@@ -79,10 +81,11 @@ class MatchDiscriminator:
             return None
         previous_for_event = {**previous, **previous_values}
         event = await self._standard_event(source, guid, payload, changed, current, previous_for_event)
+        self._enqueue_trader(event)
+        await self._write_standard_event(event)
         await self._write_process_logs(source, guid, previous_for_event, current, changed)
         if self._broadcaster is not None:
             await self._broadcaster.publish(ws_message)
-        self._enqueue_trader(event)
         return event
 
     async def _standard_event(
@@ -104,6 +107,8 @@ class MatchDiscriminator:
             "score_away": state.get("score_away"),
             "previous_score_home": previous.get("score_home"),
             "previous_score_away": previous.get("score_away"),
+            "pm_score_home_at_event": payload.get("pm_score_home_at_event"),
+            "pm_score_away_at_event": payload.get("pm_score_away_at_event"),
             "match_time": state.get("match_time"),
             "period": state.get("period"),
             "clock": state.get("clock"),
@@ -117,8 +122,10 @@ class MatchDiscriminator:
             "changed_fields": changed_fields,
             "raw_ref": payload.get("message_id"),
         }
-        await self._store.add_stream("stream:standard_events", event, ttl_seconds=MATCH_RELATED_TTL_SECONDS)
         return event
+
+    async def _write_standard_event(self, event: dict[str, Any]) -> None:
+        await self._store.add_stream("stream:standard_events", event, ttl_seconds=MATCH_RELATED_TTL_SECONDS)
 
     async def _write_process_logs(
         self,
@@ -131,6 +138,8 @@ class MatchDiscriminator:
         wrote_score_change = False
         for field in changed_fields:
             if field not in DISPLAY_PROCESS_LOG_FIELDS:
+                continue
+            if not _should_write_process_log(source, field, current):
                 continue
             if field in {"score_home", "score_away"}:
                 if wrote_score_change:
@@ -219,6 +228,14 @@ def _event_message(field: str, previous: dict[str, Any], current: dict[str, Any]
     }
     label = labels.get(field, field)
     return f"{label} {_format_current_value(current.get(field))}"
+
+
+def _should_write_process_log(source: str, field: str, current: dict[str, Any]) -> bool:
+    if field != "status":
+        return True
+    if source != "pm_sports":
+        return False
+    return str(current.get("status") or "").strip().lower() in {"live", "finished", "ended", "closed"}
 
 
 def _has_meaningful_value(value: Any) -> bool:

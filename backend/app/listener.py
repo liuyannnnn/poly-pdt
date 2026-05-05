@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from .allsportsapi import normalize_allsportsapi_ws_payload
@@ -270,6 +270,9 @@ class Listener:
         if not guid:
             await self._dead_letter("asa_live", payload, "unknown_guid")
             return None
+        pm = await self._store.get_json(f"pm:match:{guid}") or {}
+        if _finished_for_more_than(pm, payload.get("ts"), minutes=15):
+            return None
         previous = await self._store.get_json(f"asa:match:{guid}") or {}
         next_asa = dict(previous)
         score = payload.get("score") or {}
@@ -303,11 +306,10 @@ class Listener:
         await self._store.set_json(f"asa:match:{guid}", next_asa, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._store.set_json(f"external:match:{guid}", next_asa, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._publish_external_match(guid, next_asa)
-        pm = await self._store.get_json(f"pm:match:{guid}") or {}
         event = await self._discriminator.process_external_state(
             source="asa_live",
             guid=guid,
-            payload=payload,
+            payload=_with_pm_score_snapshot(payload, pm),
             previous=previous,
             current=next_asa,
             mapping={
@@ -371,6 +373,9 @@ class Listener:
         if not guid:
             await self._dead_letter("gs_live", payload, "unknown_guid")
             return None
+        pm = await self._store.get_json(f"pm:match:{guid}") or {}
+        if _finished_for_more_than(pm, payload.get("ts"), minutes=15):
+            return None
         previous = await self._store.get_json(f"gs:match:{guid}") or {}
         next_gs = dict(previous)
         score = payload.get("score") or {}
@@ -402,11 +407,10 @@ class Listener:
         await self._store.set_json(f"gs:match:{guid}", next_gs, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._store.set_json(f"external:match:{guid}", next_gs, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._publish_external_match(guid, next_gs)
-        pm = await self._store.get_json(f"pm:match:{guid}") or {}
         event = await self._discriminator.process_external_state(
             source="gs_live",
             guid=guid,
-            payload=payload,
+            payload=_with_pm_score_snapshot(payload, pm),
             previous=previous,
             current=next_gs,
             mapping={
@@ -571,6 +575,40 @@ def _is_live_status(value: Any) -> bool:
         "half_time",
         "ht",
     }
+
+
+def _with_pm_score_snapshot(payload: dict[str, Any], pm: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "pm_score_home_at_event": pm.get("score_home"),
+        "pm_score_away_at_event": pm.get("score_away"),
+    }
+
+
+def _is_finished_status(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"finished", "final", "ended", "closed", "complete", "completed"}
+
+
+def _finished_for_more_than(pm: dict[str, Any], ts_utc: Any, *, minutes: int) -> bool:
+    if not _is_finished_status(pm.get("status")):
+        return False
+    finished_at = _parse_datetime(str(pm.get("finished_at_utc") or pm.get("updated_at_utc") or ""))
+    if finished_at is None:
+        return False
+    current = _parse_datetime(str(ts_utc or "")) or datetime.now(UTC)
+    return current - finished_at > timedelta(minutes=minutes)
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _is_score_regression(previous: dict[str, Any], score: dict[str, Any]) -> bool:

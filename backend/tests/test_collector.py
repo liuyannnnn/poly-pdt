@@ -500,6 +500,42 @@ async def test_collector_keeps_live_match_that_started_yesterday_after_midnight(
 
 
 @pytest.mark.asyncio
+async def test_collector_stops_collecting_finished_match_after_15_minutes():
+    pm_payload = [
+        {
+            **PM_EVENTS[0],
+            "id": "pm-finished-old",
+            "slug": "finished-old",
+            "start_time": "2026-05-01T19:00:00Z",
+            "status": "finished",
+            "volume": {"total": 900000, "moneyline": 500000},
+            "updated_at_utc": "2026-05-01T21:00:00Z",
+        },
+        {
+            **PM_EVENTS[1],
+            "id": "pm-finished-recent",
+            "slug": "finished-recent",
+            "start_time": "2026-05-01T19:00:00Z",
+            "status": "finished",
+            "volume": {"total": 900000, "moneyline": 500000},
+            "updated_at_utc": "2026-05-01T21:06:00Z",
+        },
+    ]
+    collector = Collector(
+        store=MemoryStore(),
+        pm_client=StaticPMHttpClient(pm_payload),
+        gs_client=StaticGSHttpClient(home=[], d1=[]),
+        now=lambda: "2026-05-01T21:20:00Z",
+    )
+    collector.set_filters(football_volume_threshold_k=500, upcoming_days=2)
+
+    report = await collector.collect_once()
+
+    assert report["pm_seen"] == 1
+    assert report["pending_bindings"][0]["pm_slug"] == "finished-recent"
+
+
+@pytest.mark.asyncio
 async def test_collector_enqueues_pm_snapshot_events_for_trader():
     class RecordingTrader:
         def __init__(self):

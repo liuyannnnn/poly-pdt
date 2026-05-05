@@ -95,6 +95,7 @@ class TraderManager:
         self._process_interval_seconds = process_interval_seconds
         self._running = False
         self._task: asyncio.Task[None] | None = None
+        self._wake_event = asyncio.Event()
 
     async def start(self) -> None:
         await self._hydrate_from_store()
@@ -102,10 +103,12 @@ class TraderManager:
             return None
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
+        self._wake_event.set()
         return None
 
     async def stop(self) -> None:
         self._running = False
+        self._wake_event.set()
         task = self._task
         self._task = None
         if task is not None:
@@ -247,14 +250,18 @@ class TraderManager:
         self._get_existing_instance(trading_id).risk = risk
 
     def enqueue_event(self, event: dict[str, Any]) -> None:
+        queued = False
         for instance in self._tradings.values():
             if instance.snapshot.status == "running":
                 guid = str(event.get("guid") or "")
-                if guid:
+                if guid and _should_coalesce_queued_event(event):
                     if guid in instance.queued_guids:
                         continue
                     instance.queued_guids.add(guid)
                 instance.queue.put_nowait(event)
+                queued = True
+        if queued:
+            self._wake_event.set()
 
     def queue_size(self, trading_id: str) -> int:
         return self._get_existing_instance(trading_id).queue.qsize()
@@ -292,9 +299,11 @@ class TraderManager:
 
     async def _run_loop(self) -> None:
         while self._running:
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._wake_event.wait(), timeout=self._process_interval_seconds)
+            self._wake_event.clear()
             with suppress(Exception):
                 await self.process_queued_events()
-            await asyncio.sleep(self._process_interval_seconds)
 
     async def persist(self, trading_id: str) -> None:
         await self._persist_instance(self._get_existing_instance(trading_id))
@@ -693,8 +702,8 @@ class TraderAPI:
         if log_difference:
             _append_quote_difference_log(self._instance, guid, outcome_key, cached, fresh)
         return {
-            "ask1": fresh["ask1"] if fresh["ask1"] is not None else cached.get("ask1"),
-            "bid1": fresh["bid1"] if fresh["bid1"] is not None else cached.get("bid1"),
+            "ask1": _max_optional_number(cached.get("ask1"), fresh["ask1"]),
+            "bid1": _min_optional_number(cached.get("bid1"), fresh["bid1"]),
         }
 
     async def _trade_context(
@@ -725,10 +734,10 @@ async def football_score_delay_trade(
         return []
     pm = await api.get_pm_match(guid) or {}
     gs = await api.get_gs_match(guid) or {}
-    pm_home = int(pm.get("score_home") or 0)
-    pm_away = int(pm.get("score_away") or 0)
-    gs_home = int(gs.get("score_home") or 0)
-    gs_away = int(gs.get("score_away") or 0)
+    pm_home = _score_int(event.get("pm_score_home_at_event"), pm.get("score_home"))
+    pm_away = _score_int(event.get("pm_score_away_at_event"), pm.get("score_away"))
+    gs_home = _score_int(event.get("score_home"), gs.get("score_home"))
+    gs_away = _score_int(event.get("score_away"), gs.get("score_away"))
     positions = [position for position in api.get_positions() if position.guid == guid]
     protective_exit = await _score_delay_protective_exit(api, guid, event)
     if protective_exit:
@@ -736,14 +745,14 @@ async def football_score_delay_trade(
     if (gs_home, gs_away) == (pm_home, pm_away):
         return []
 
-    if gs_home > gs_away and gs_home > pm_home:
-        target = "home"
-    elif gs_away > gs_home and gs_away > pm_away:
-        target = "away"
-    else:
+    target = _score_delay_target(pm_home, pm_away, gs_home, gs_away, event)
+    if target is None:
+        reason = _score_delay_no_target_reason(event)
+        if reason:
+            return [_no_trade_intent(guid, reason)]
         return []
 
-    current_minute = _minute(gs.get("clock") or gs.get("match_time") or pm.get("match_time"))
+    current_minute = _minute(event.get("clock") or event.get("match_time") or gs.get("clock") or gs.get("match_time") or pm.get("match_time"))
     opposite = [position for position in positions if position.outcome_key != target and position.shares > 0]
 
     market = await api.get_market(guid)
@@ -764,10 +773,11 @@ async def football_score_delay_trade(
                 "reason": "反向进球卖出",
             }
         )
+    signal_name = "追平" if target == "draw" else "进球"
     if float(ask) > 0.93:
-        return intents or [_no_trade_intent(guid, "进球但高于0.93不加仓" if is_add else "进球但高于0.93不买入")]
-    if same and not _leader_scored_again(event, target):
-        return intents or [_no_trade_intent(guid, "未继续进球不加仓")]
+        return intents or [_no_trade_intent(guid, f"{signal_name}但高于0.93不加仓" if is_add else f"{signal_name}但高于0.93不买入")]
+    if same and not _score_delay_signal_advanced(event, target):
+        return intents or [_no_trade_intent(guid, "未再次追平不加仓" if target == "draw" else "未继续进球不加仓")]
     if same and same[0].add_count >= api._instance.risk.max_add_count:
         return intents or [_no_trade_intent(guid, "单场最多加仓次数已达上限不加仓")]
     budget = _entry_budget(api, is_add=is_add, current_minute=current_minute)
@@ -779,7 +789,7 @@ async def football_score_delay_trade(
             "guid": guid,
             "outcome_key": target,
             "amount_usd": budget,
-            "reason": "进球加仓" if same else "进球买入",
+            "reason": f"{signal_name}加仓" if same else f"{signal_name}买入",
         }
     )
     return intents
@@ -836,6 +846,12 @@ def _risk_from_params(params: dict[str, Any]) -> RiskLimits:
     )
 
 
+def _should_coalesce_queued_event(event: dict[str, Any]) -> bool:
+    changed = set(event.get("changed_fields") or [])
+    # 比分变化是低频且有顺序语义的交易信号，不能按同一场比赛 guid 合并。
+    return not bool({"score_home", "score_away"} & changed)
+
+
 def _is_external_score_change_event(event: dict[str, Any] | None) -> bool:
     if not event:
         return False
@@ -855,6 +871,77 @@ def _leader_scored_again(event: dict[str, Any] | None, target: str) -> bool:
     if current is None or previous is None:
         return False
     return current > previous
+
+
+def _score_int(*values: Any) -> int:
+    for value in values:
+        number = _optional_number(value)
+        if number is not None:
+            return int(number)
+    return 0
+
+
+def _score_delay_target(
+    pm_home: int,
+    pm_away: int,
+    gs_home: int,
+    gs_away: int,
+    event: dict[str, Any] | None,
+) -> str | None:
+    if _external_equalized_before_pm(pm_home, pm_away, event):
+        return "draw"
+    if gs_home > gs_away and gs_home > pm_home:
+        return "home"
+    if gs_away > gs_home and gs_away > pm_away:
+        return "away"
+    return None
+
+
+def _score_delay_signal_advanced(event: dict[str, Any] | None, target: str) -> bool:
+    if target == "draw":
+        return _external_equalized(event)
+    return _leader_scored_again(event, target)
+
+
+def _score_delay_no_target_reason(event: dict[str, Any] | None) -> str | None:
+    if not event:
+        return None
+    previous_home = _optional_number(event.get("previous_score_home"))
+    previous_away = _optional_number(event.get("previous_score_away"))
+    score_home = _optional_number(event.get("score_home"))
+    score_away = _optional_number(event.get("score_away"))
+    if None in {previous_home, previous_away, score_home, score_away}:
+        return None
+    previous = (int(previous_home), int(previous_away))
+    current = (int(score_home), int(score_away))
+    if sum(current) <= sum(previous):
+        return None
+    previous_leader = _leader_from_score(*previous)
+    current_leader = _leader_from_score(*current)
+    if previous_leader and previous_leader == current_leader:
+        previous_margin = abs(previous[0] - previous[1])
+        current_margin = abs(current[0] - current[1])
+        if previous_margin > current_margin > 1:
+            return "落后方进球但领先优势仍大于1不操作"
+    return None
+
+
+def _external_equalized_before_pm(pm_home: int, pm_away: int, event: dict[str, Any] | None) -> bool:
+    return pm_home != pm_away and _external_equalized(event)
+
+
+def _external_equalized(event: dict[str, Any] | None) -> bool:
+    if not event:
+        return False
+    previous_home = _optional_number(event.get("previous_score_home"))
+    previous_away = _optional_number(event.get("previous_score_away"))
+    score_home = _optional_number(event.get("score_home"))
+    score_away = _optional_number(event.get("score_away"))
+    if None in {previous_home, previous_away, score_home, score_away}:
+        return False
+    previous = (int(previous_home), int(previous_away))
+    current = (int(score_home), int(score_away))
+    return previous[0] != previous[1] and current[0] == current[1] and sum(current) > sum(previous)
 
 
 def _entry_budget(api: TraderAPI, *, is_add: bool, current_minute: int) -> float:
@@ -1042,7 +1129,7 @@ def _append_quote_difference_log(
         new = _optional_number(fresh.get(label))
         if old is None or new is None:
             continue
-        if abs(new - old) > 0.01:
+        if round(abs(new - old), 6) > 0.01:
             parts.append(f"{label} WS {old:.3f} -> CLOB {new:.3f}")
     if not parts:
         return
@@ -1090,6 +1177,16 @@ def _optional_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _max_optional_number(left: Any, right: Any) -> float | None:
+    values = [value for value in (_optional_number(left), _optional_number(right)) if value is not None]
+    return max(values) if values else None
+
+
+def _min_optional_number(left: Any, right: Any) -> float | None:
+    values = [value for value in (_optional_number(left), _optional_number(right)) if value is not None]
+    return min(values) if values else None
 
 
 def _utc_datetime(value: Any) -> datetime | None:
