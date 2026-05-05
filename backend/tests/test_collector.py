@@ -536,7 +536,7 @@ async def test_collector_stops_collecting_finished_match_after_15_minutes():
 
 
 @pytest.mark.asyncio
-async def test_collector_enqueues_pm_snapshot_events_for_trader():
+async def test_collector_does_not_enqueue_pm_snapshot_events_for_trader():
     class RecordingTrader:
         def __init__(self):
             self.events = []
@@ -555,13 +555,8 @@ async def test_collector_enqueues_pm_snapshot_events_for_trader():
 
     report = await collector.collect_once()
 
-    assert trader.events == [
-        {
-            "guid": report["pending_bindings"][0]["guid"],
-            "source": "pm_http",
-            "received_at_utc": report["completed_at_utc"],
-        }
-    ]
+    assert report["pending_bindings"][0]["guid"]
+    assert trader.events == []
 
 
 @pytest.mark.asyncio

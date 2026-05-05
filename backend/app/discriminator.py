@@ -41,24 +41,6 @@ class MatchDiscriminator:
         self._trader_manager = trader_manager
         self._external_process_values: dict[tuple[str, str], dict[str, Any]] = {}
 
-    async def process_market_tick(
-        self,
-        *,
-        source: str,
-        guid: str,
-        payload: dict[str, Any],
-        previous: dict[str, Any],
-        current: dict[str, Any],
-        mapping: dict[str, str],
-    ) -> dict[str, Any] | None:
-        changed = _changed_fields(previous, current, mapping)
-        if not changed:
-            return None
-        event = await self._standard_event(source, guid, payload, changed, current, previous)
-        self._enqueue_trader(event)
-        await self._write_standard_event(event)
-        return event
-
     async def process_external_state(
         self,
         *,

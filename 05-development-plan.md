@@ -306,9 +306,19 @@
 - 日志可定位 source、guid、trader_id、order_id。
 - 所有测试、lint、前端 build 通过。
 
-## 第四轮：交易模块解耦改造（待确认后执行）
+## 第四轮：交易模块解耦改造（进行中）
 
-这一轮只在用户确认后改代码。目标是按最新交易架构把“监听器、判别器、交易模块、交易员、策略、通用函数”分清楚，避免高频行情和低频比赛信号互相影响。
+目标是按最新交易架构把“监听器、判别器、交易模块、交易员、策略、通用函数”分清楚，避免高频行情和低频比赛信号互相影响。
+
+当前状态：
+
+- 已接通 PM market tick -> Trader `on_market_tick` 独立行情通道。
+- 已接通 PM sports/GS/ASA -> 判别器 -> Trader `on_match_signal` 独立比赛信号通道。
+- 已接通 PM user -> Trader `on_account_event` 独立账号事件通道。
+- 已删除比赛信号按 `guid` 合并/丢弃的逻辑。
+- 已保证 Collector 只采集、入库、推送前端，不再向 Trader 发送 `pm_http` 策略事件。
+- 已实现交易模块最新行情内存态，`get_market(guid)` 优先读取内存最新 ask1/bid1，再回退 Redis 当前态。
+- provider gateway 的真实下单接口仍保持 dry-run/骨架状态；真实订单仍需要单独授权。
 
 ### 4.1 架构边界
 

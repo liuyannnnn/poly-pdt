@@ -368,19 +368,11 @@ class Collector:
         binding: dict[str, Any] | None = None,
     ) -> None:
         if self._broadcaster is None:
-            if self._trader_manager is not None:
-                self._trader_manager.enqueue_event(
-                    {"guid": guid, "source": "pm_http", "received_at_utc": snapshot["snapshot_ts_utc"]}
-                )
             return
         await self._broadcaster.publish(
             {"topic": "match.snapshot", "payload": _with_binding_fields(_match_card(guid, pm), binding or {})}
         )
         await self._broadcaster.publish({"topic": "chart.snapshot", "payload": snapshot})
-        if self._trader_manager is not None:
-            self._trader_manager.enqueue_event(
-                {"guid": guid, "source": "pm_http", "received_at_utc": snapshot["snapshot_ts_utc"]}
-            )
 
     async def _write_gs(self, guid: str, gs: dict[str, Any]) -> None:
         await self._store.set_json(f"gs:match:{guid}", gs, ttl_seconds=MATCH_STATE_TTL_SECONDS)
