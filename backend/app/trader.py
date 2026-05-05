@@ -41,6 +41,7 @@ class Account:
     equity: float = 0.0
     fund_usage_pct: float = 0.0
     position_count: int = 0
+    provider: str = "pm"
 
     def __post_init__(self) -> None:
         if self.equity == 0:
@@ -75,7 +76,6 @@ class TraderInstance:
     positions: list[Position] = field(default_factory=list)
     trades: list[dict[str, Any]] = field(default_factory=list)
     logs: list[dict[str, Any]] = field(default_factory=list)
-    queued_guids: set[str] = field(default_factory=set)
     account_alias: str | None = None
     persisted_trade_count: int = 0
     persisted_log_count: int = 0
@@ -96,6 +96,7 @@ class TraderManager:
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._wake_event = asyncio.Event()
+        self._market_state: dict[str, dict[str, dict[str, float | None]]] = {}
 
     async def start(self) -> None:
         await self._hydrate_from_store()
@@ -146,6 +147,7 @@ class TraderManager:
                 account_alias=payload.account_alias,
                 initial_balance=initial_balance,
                 available_cash=initial_balance,
+                provider=str(params.get("provider") or params.get("account_provider") or "pm").lower(),
             ),
             risk=_risk_from_params(params),
             account_alias=payload.account_alias,
@@ -249,22 +251,75 @@ class TraderManager:
     def set_risk_limits(self, trading_id: str, risk: RiskLimits) -> None:
         self._get_existing_instance(trading_id).risk = risk
 
-    def enqueue_event(self, event: dict[str, Any]) -> None:
+    def on_match_signal(self, event: dict[str, Any]) -> None:
+        """比赛信号入口：只接收判别器产出的比赛变化事件。
+
+        这里不再按 guid 合并。比分、红黄牌、状态等比赛信号都有时序意义，
+        高频盘口 tick 走 on_market_tick，不会进入这个策略队列。
+        """
+
         queued = False
         for instance in self._tradings.values():
             if instance.snapshot.status == "running":
-                guid = str(event.get("guid") or "")
-                if guid and _should_coalesce_queued_event(event):
-                    if guid in instance.queued_guids:
-                        continue
-                    instance.queued_guids.add(guid)
                 instance.queue.put_nowait(event)
                 queued = True
         if queued:
             self._wake_event.set()
 
+    def enqueue_event(self, event: dict[str, Any]) -> None:
+        # 兼容 Collector 和旧测试入口；语义等同于比赛信号入队，不做 guid 去重。
+        self.on_match_signal(event)
+
+    async def on_market_tick(self, event: dict[str, Any]) -> None:
+        """盘口 tick 入口：只用于持仓估值和通用强制平仓，不运行策略。"""
+
+        guid = str(event.get("guid") or "")
+        if not guid:
+            return
+        self._update_market_state(event)
+        for instance in list(self._tradings.values()):
+            if instance.snapshot.status != "running":
+                continue
+            if not any(position.guid == guid and position.shares > 0 for position in instance.positions):
+                continue
+            await self._process_market_tick(instance, event)
+
+    async def on_account_event(self, event: dict[str, Any]) -> None:
+        """账户事件入口：PM/未来 KS user stream 直接更新对应实盘交易员账户。"""
+
+        alias = event.get("account_alias")
+        provider = str(event.get("provider") or "pm").lower()
+        account_row = event.get("account") if isinstance(event.get("account"), dict) else {}
+        for instance in list(self._tradings.values()):
+            if instance.snapshot.mode != "real":
+                continue
+            if instance.account.account_alias != alias:
+                continue
+            if str(instance.account.provider or "pm").lower() != provider:
+                continue
+            balance = _first_optional_number(account_row, "balance", "equity", "total_assets", "total_balance")
+            available = _first_optional_number(account_row, "available_cash", "available", "cash")
+            if balance is not None:
+                instance.account.initial_balance = balance
+                instance.account.equity = balance
+            if available is not None:
+                instance.account.available_cash = available
+            instance.account.provider = provider
+            await self._persist_instance(instance)
+
     def queue_size(self, trading_id: str) -> int:
         return self._get_existing_instance(trading_id).queue.qsize()
+
+    def _update_market_state(self, event: dict[str, Any]) -> None:
+        outcome = str(event.get("outcome_key") or "")
+        guid = str(event.get("guid") or "")
+        if outcome not in {"home", "draw", "away"} or not guid:
+            return
+        row = self._market_state.setdefault(guid, {}).setdefault(outcome, {"ask1": None, "bid1": None})
+        if event.get("ask1") is not None:
+            row["ask1"] = _optional_number(event.get("ask1"))
+        if event.get("bid1") is not None:
+            row["bid1"] = _optional_number(event.get("bid1"))
 
     async def process_queued_events(self) -> dict[str, int]:
         processed = 0
@@ -273,7 +328,6 @@ class TraderManager:
         for instance in list(self._tradings.values()):
             while not instance.queue.empty():
                 event = instance.queue.get_nowait()
-                guid = str(event.get("guid") or "")
                 processed += 1
                 try:
                     new_trades = await self._process_event(instance, event)
@@ -292,9 +346,6 @@ class TraderManager:
                         }
                     )
                     await self._persist_instance(instance)
-                finally:
-                    if guid:
-                        instance.queued_guids.discard(guid)
         return {"processed": processed, "trades": trades, "failures": failures}
 
     async def _run_loop(self) -> None:
@@ -429,6 +480,23 @@ class TraderManager:
             intents = await football_winrate_gap_buy(api, guid)
         else:
             return 0
+        return await self._execute_intents(instance, intents)
+
+    async def _process_market_tick(self, instance: TraderInstance, event: dict[str, Any]) -> int:
+        guid = str(event.get("guid") or "")
+        if not guid:
+            return 0
+        api = self.api(instance.snapshot.trading_id)
+        pm = await api.get_pm_match(guid) or {}
+        gs = await api.get_gs_match(guid) or {}
+        intents = await _position_exit_intents(api, guid, pm, gs)
+        trades = await self._execute_intents(instance, intents)
+        # 即使没有触发卖出，tick 也可能更新持仓 peak/current 估值，需要保留到内存/Redis 快照。
+        await self._persist_instance(instance)
+        return trades
+
+    async def _execute_intents(self, instance: TraderInstance, intents: list[dict[str, Any]]) -> int:
+        api = self.api(instance.snapshot.trading_id)
         trades = 0
         for intent in intents:
             if intent["action"] == "buy":
@@ -454,10 +522,15 @@ class TraderAPI:
 
     async def get_market(self, guid: str) -> dict[str, dict[str, float | None]]:
         pm = await self.get_pm_match(guid) or {}
+        cached = self._manager._market_state.get(guid, {})
         return {
             outcome: {
-                "ask1": pm.get(f"{outcome}_ask1"),
-                "bid1": pm.get(f"{outcome}_bid1"),
+                "ask1": cached.get(outcome, {}).get("ask1")
+                if cached.get(outcome, {}).get("ask1") is not None
+                else pm.get(f"{outcome}_ask1"),
+                "bid1": cached.get(outcome, {}).get("bid1")
+                if cached.get(outcome, {}).get("bid1") is not None
+                else pm.get(f"{outcome}_bid1"),
             }
             for outcome in ("home", "draw", "away")
         }
@@ -846,12 +919,6 @@ def _risk_from_params(params: dict[str, Any]) -> RiskLimits:
     )
 
 
-def _should_coalesce_queued_event(event: dict[str, Any]) -> bool:
-    changed = set(event.get("changed_fields") or [])
-    # 比分变化是低频且有顺序语义的交易信号，不能按同一场比赛 guid 合并。
-    return not bool({"score_home", "score_away"} & changed)
-
-
 def _is_external_score_change_event(event: dict[str, Any] | None) -> bool:
     if not event:
         return False
@@ -1177,6 +1244,16 @@ def _optional_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first_optional_number(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if key not in row:
+            continue
+        number = _optional_number(row.get(key))
+        if number is not None:
+            return number
+    return None
 
 
 def _max_optional_number(left: Any, right: Any) -> float | None:

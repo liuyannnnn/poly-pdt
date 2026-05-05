@@ -247,17 +247,23 @@ class Listener:
             },
         }
         await self._broadcaster.publish(tick_message)
-        event = await self._discriminator.process_market_tick(
-            source="pm_market",
-            guid=guid,
-            payload=payload,
-            previous=previous,
-            current=next_pm,
-            mapping={
-                f"{outcome}_ask1": f"moneyline.{outcome}.ask1",
-                f"{outcome}_bid1": f"moneyline.{outcome}.bid1",
-            },
-        )
+        event = {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": guid,
+            "outcome_key": outcome,
+            "asset_id": payload.get("asset_id"),
+            "ask1": ask,
+            "bid1": bid,
+            "ts_utc": next_pm["updated_at_utc"],
+            "received_at_utc": _utc_now(),
+            "status": next_pm.get("status"),
+            "match_time": next_pm.get("match_time"),
+            "score_home": next_pm.get("score_home"),
+            "score_away": next_pm.get("score_away"),
+        }
+        if self._trader_manager is not None and hasattr(self._trader_manager, "on_market_tick"):
+            await self._trader_manager.on_market_tick(event)
         return event
 
     async def _process_asa_live(self, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -434,35 +440,50 @@ class Listener:
 
     async def _process_pm_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         alias = payload.get("account_alias") or "default"
+        provider = str(payload.get("provider") or "pm").lower()
         now = payload.get("ts") or _utc_now()
         changed_fields: list[str] = []
+        account: dict[str, Any] | None = None
         if "balance" in payload or "available_cash" in payload:
             account = {
+                "provider": provider,
                 "account_alias": alias,
                 "balance": payload.get("balance"),
                 "available_cash": payload.get("available_cash"),
                 "updated_at_utc": now,
             }
             await self._store.set_json(f"account:{alias}", account)
+            await self._store.set_json(f"account:{provider}:{alias}", account)
             changed_fields.append("account")
             await self._broadcaster.publish({"topic": "account.update", "payload": account})
+        orders: list[dict[str, Any]] = []
         for order in payload.get("orders") or []:
-            row = dict(order, account_alias=alias, ts_utc=now, guid=await self._guid_from_order(order))
+            row = dict(order, provider=provider, account_alias=alias, ts_utc=now, guid=await self._guid_from_order(order))
+            orders.append(row)
             await self._store.add_stream("stream:orders", row, ttl_seconds=MATCH_RELATED_TTL_SECONDS)
             changed_fields.append("orders")
+        fills: list[dict[str, Any]] = []
         for fill in payload.get("fills") or []:
-            row = dict(fill, account_alias=alias, ts_utc=now)
+            row = dict(fill, provider=provider, account_alias=alias, ts_utc=now)
+            fills.append(row)
             await self._store.add_stream("stream:fills", row, ttl_seconds=MATCH_RELATED_TTL_SECONDS)
             changed_fields.append("fills")
         event = {
             "received_at_utc": _utc_now(),
             "pushed_at_utc": _utc_now(),
             "source": "pm_user",
+            "provider": provider,
+            "account_alias": alias,
             "guid": None,
             "changed_fields": list(dict.fromkeys(changed_fields)),
+            "account": account,
+            "orders": orders,
+            "fills": fills,
             "raw_ref": payload.get("message_id"),
         }
-        await self._store.add_stream("stream:standard_events", event, ttl_seconds=MATCH_RELATED_TTL_SECONDS)
+        await self._store.add_stream(f"stream:account_events:{provider}:{alias}", event)
+        if self._trader_manager is not None and hasattr(self._trader_manager, "on_account_event"):
+            await self._trader_manager.on_account_event(event)
         return event
 
     async def _dead_letter(self, source: str, payload: dict[str, Any], reason: str) -> None:

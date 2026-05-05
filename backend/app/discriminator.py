@@ -166,7 +166,10 @@ class MatchDiscriminator:
 
     def _enqueue_trader(self, event: dict[str, Any]) -> None:
         if self._trader_manager is not None:
-            self._trader_manager.enqueue_event(event)
+            if hasattr(self._trader_manager, "on_match_signal"):
+                self._trader_manager.on_match_signal(event)
+            else:
+                self._trader_manager.enqueue_event(event)
 
 
 def _changed_fields(previous: dict[str, Any], current: dict[str, Any], mapping: dict[str, str]) -> list[str]:

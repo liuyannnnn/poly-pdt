@@ -586,8 +586,177 @@ async def test_score_delay_strategy_does_not_repeat_buy_on_clock_or_pm_events():
     assert await manager.process_queued_events() == {"processed": 1, "trades": 1, "failures": 0}
     manager.enqueue_event({"guid": "guid-1", "source": "asa_live", "changed_fields": ["clock"]})
     manager.enqueue_event({"guid": "guid-1", "source": "pm_sports", "changed_fields": ["match_time"]})
-    assert await manager.process_queued_events() == {"processed": 1, "trades": 0, "failures": 0}
+    assert await manager.process_queued_events() == {"processed": 2, "trades": 0, "failures": 0}
     assert len(manager.get_trades(trading.trading_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_ticks_use_separate_channel_and_do_not_enter_strategy_queue():
+    store = MemoryStore()
+    await seed_market(store)
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+
+    manager.on_match_signal(_asa_score_event("guid-1", 0, 0, 1, 0))
+    manager.on_match_signal(_asa_score_event("guid-1", 1, 0, 2, 0))
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.61,
+            "bid1": 0.59,
+        }
+    )
+
+    assert manager.queue_size(trading.trading_id) == 2
+
+
+@pytest.mark.asyncio
+async def test_market_tick_channel_checks_drawdown_without_running_strategy_queue():
+    store = MemoryStore()
+    await seed_market(store)
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {
+                "initial_balance": 1000,
+                "risk": {"max_positions": 3, "max_fund_usage_pct": 90, "max_single_order_pct": 20},
+            },
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+    api = manager.api(trading.trading_id)
+    await api.buy("guid-1", "home", 100)
+    pm = await store.get_json("pm:match:guid-1")
+
+    await store.set_json("pm:match:guid-1", {**pm, "home_ask1": 0.70, "home_bid1": 0.69})
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.70,
+            "bid1": 0.69,
+        }
+    )
+    assert manager.queue_size(trading.trading_id) == 0
+    assert len(manager.get_trades(trading.trading_id)) == 1
+
+    await store.set_json("pm:match:guid-1", {**pm, "home_ask1": 0.64, "home_bid1": 0.63})
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.64,
+            "bid1": 0.63,
+        }
+    )
+
+    assert manager.queue_size(trading.trading_id) == 0
+    assert [trade["side"] for trade in manager.get_trades(trading.trading_id)] == ["buy", "sell"]
+    assert manager.get_trades(trading.trading_id)[-1]["reason"] == "回撤0.05卖出"
+
+
+@pytest.mark.asyncio
+async def test_market_tick_channel_uses_in_memory_quote_before_redis_snapshot():
+    store = MemoryStore()
+    await seed_market(store)
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {
+                "initial_balance": 1000,
+                "risk": {"max_positions": 3, "max_fund_usage_pct": 90, "max_single_order_pct": 20},
+            },
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+    await manager.api(trading.trading_id).buy("guid-1", "home", 100)
+
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.70,
+            "bid1": 0.69,
+        }
+    )
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.64,
+            "bid1": 0.63,
+        }
+    )
+
+    pm = await store.get_json("pm:match:guid-1")
+    assert pm["home_ask1"] == 0.61
+    assert [trade["side"] for trade in manager.get_trades(trading.trading_id)] == ["buy", "sell"]
+
+
+@pytest.mark.asyncio
+async def test_account_events_update_matching_real_trader_only():
+    store = MemoryStore()
+    manager = TraderManager(store=store)
+    pm_trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"real_dry_run": True},
+            "affect_sports": ["football"],
+            "mode": "real",
+            "account_alias": "pm-main",
+        }
+    )
+    other_trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"real_dry_run": True},
+            "affect_sports": ["football"],
+            "mode": "real",
+            "account_alias": "pm-other",
+        }
+    )
+
+    await manager.on_account_event(
+        {
+            "source": "pm_user",
+            "provider": "pm",
+            "account_alias": "pm-main",
+            "changed_fields": ["account"],
+            "account": {"balance": 123.45, "available_cash": 111.22},
+        }
+    )
+
+    pm_account = manager.get_account(pm_trading.trading_id)
+    other_account = manager.get_account(other_trading.trading_id)
+    assert pm_account.initial_balance == pytest.approx(123.45)
+    assert pm_account.available_cash == pytest.approx(111.22)
+    assert pm_account.equity == pytest.approx(123.45)
+    assert other_account.available_cash == 0
 
 
 @pytest.mark.asyncio
@@ -1065,7 +1234,7 @@ async def test_winrate_gap_strategy_does_not_reenter_after_exit():
 
 
 @pytest.mark.asyncio
-async def test_trader_queue_coalesces_duplicate_match_events():
+async def test_trader_queue_preserves_duplicate_match_events():
     store = MemoryStore()
     await seed_market(store)
     manager = TraderManager(store=store)
@@ -1083,7 +1252,7 @@ async def test_trader_queue_coalesces_duplicate_match_events():
     manager.enqueue_event({"guid": "guid-1"})
     manager.enqueue_event({"guid": "guid-2"})
 
-    assert manager.queue_size(trading.trading_id) == 2
+    assert manager.queue_size(trading.trading_id) == 3
 
 
 @pytest.mark.asyncio

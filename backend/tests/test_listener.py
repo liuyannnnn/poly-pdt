@@ -37,9 +37,20 @@ class SlowStreamStore(MemoryStore):
 class RecordingTraderManager:
     def __init__(self):
         self.events = []
+        self.market_ticks = []
+        self.account_events = []
 
     def enqueue_event(self, event):
         self.events.append(event)
+
+    def on_match_signal(self, event):
+        self.events.append(event)
+
+    async def on_market_tick(self, event):
+        self.market_ticks.append(event)
+
+    async def on_account_event(self, event):
+        self.account_events.append(event)
 
 
 @pytest.mark.asyncio
@@ -92,7 +103,7 @@ async def test_listener_updates_pm_market_without_overwriting_gs_state_and_broad
     pm = await store.get_json(f"pm:match:{guid}")
     await store.set_json(f"pm:match:{guid}", {**pm, "status": "live"})
     hub = BroadcastHub()
-    trader = TraderManager(store=store)
+    trader = RecordingTraderManager()
     listener = Listener(store=store, broadcaster=hub, trader_manager=trader)
     tick_ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -116,7 +127,13 @@ async def test_listener_updates_pm_market_without_overwriting_gs_state_and_broad
     assert event is not None
     assert event["source"] == "pm_market"
     assert event["guid"] == guid
-    assert "moneyline.home.ask1" in event["changed_fields"]
+    assert event["event_type"] == "market_tick"
+    assert event["outcome_key"] == "home"
+    assert event["ask1"] == 0.53
+    assert event["bid1"] == 0.51
+    assert trader.market_ticks == [event]
+    assert trader.events == []
+    assert await store.stream("stream:standard_events") == []
     assert pm_match["home_ask1"] == 0.53
     assert gs_match["odds_home"] == 2.1
     assert orderbook["ask1"] == 0.53
@@ -640,7 +657,7 @@ async def test_listener_sends_unknown_guid_payloads_to_dead_letter_only():
 
 
 @pytest.mark.asyncio
-async def test_listener_does_not_enqueue_trader_or_standard_event_for_unchanged_market_tick():
+async def test_listener_routes_unchanged_market_tick_without_standard_event():
     store, guid = await seed_store()
     hub = BroadcastHub()
     trader = TraderManager(store=store)
@@ -668,7 +685,8 @@ async def test_listener_does_not_enqueue_trader_or_standard_event_for_unchanged_
         },
     )
 
-    assert event is None
+    assert event is not None
+    assert event["event_type"] == "market_tick"
     assert trader.queue_size(created.trading_id) == 0
     assert await store.stream("stream:standard_events") == []
     assert (await hub.drain())[-1]["topic"] == "market.tick"
@@ -678,16 +696,7 @@ async def test_listener_does_not_enqueue_trader_or_standard_event_for_unchanged_
 async def test_listener_reconciles_pm_user_account_without_trader_queue_side_effects():
     store, guid = await seed_store()
     hub = BroadcastHub()
-    trader = TraderManager(store=store)
-    created = await trader.create_trading(
-        {
-            "strategy_name": "football_score_delay_trade",
-            "strategy_params": {"initial_balance": 500},
-            "affect_sports": ["football"],
-            "mode": "simulation",
-        }
-    )
-    await trader.start_trading(created.trading_id)
+    trader = RecordingTraderManager()
     listener = Listener(store=store, broadcaster=hub, trader_manager=trader)
 
     await listener.process_payload(
@@ -700,6 +709,8 @@ async def test_listener_reconciles_pm_user_account_without_trader_queue_side_eff
             "message_id": "sports-1",
         },
     )
+    events_before_user = list(trader.events)
+    standard_events_before_user = await store.stream("stream:standard_events")
     event = await listener.process_payload(
         "pm_user",
         {
@@ -711,12 +722,19 @@ async def test_listener_reconciles_pm_user_account_without_trader_queue_side_eff
     )
 
     account = await store.get_json("account:pm-main")
-    queued = trader.queue_size(created.trading_id)
+    provider_account = await store.get_json("account:pm:pm-main")
+    account_events = await store.stream("stream:account_events:pm:pm-main")
 
     assert event is not None
     assert event["source"] == "pm_user"
+    assert event["provider"] == "pm"
+    assert event["account_alias"] == "pm-main"
     assert account["available_cash"] == 950
-    assert queued == 1
+    assert provider_account["available_cash"] == 950
+    assert trader.events == events_before_user
+    assert trader.account_events == [event]
+    assert account_events[-1]["account"]["available_cash"] == 950
+    assert await store.stream("stream:standard_events") == standard_events_before_user
     assert (await store.get_json(f"pm:match:{guid}"))["status"] == "live"
 
 
