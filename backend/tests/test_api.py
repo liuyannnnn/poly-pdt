@@ -128,6 +128,32 @@ def test_match_snapshots_endpoint_returns_all_and_live_series_rows():
     assert live.json()[0]["phase"] == "LIVE"
 
 
+def test_trades_and_logs_endpoints_ignore_legacy_json_lists():
+    store = MemoryStore()
+
+    async def seed() -> None:
+        await store.set_json(
+            "trader:S001:trades",
+            [{"trading_id": "S001", "guid": "legacy-guid", "side": "buy", "ts_utc": "2026-05-01T00:00:00Z"}],
+        )
+        await store.set_json(
+            "trader:S001:logs",
+            [{"trader_id": "S001", "guid": "legacy-guid", "message": "legacy", "ts_utc": "2026-05-01T00:00:00Z"}],
+        )
+
+    asyncio.run(seed())
+    isolated_app = create_app(store=store, collector=Collector(store=store, pm_client=StaticPMHttpClient([])))
+
+    with TestClient(isolated_app) as client:
+        trades = client.get("/api/v1/trades")
+        logs = client.get("/api/v1/logs")
+
+    assert trades.status_code == 200
+    assert logs.status_code == 200
+    assert trades.json() == []
+    assert logs.json() == []
+
+
 def test_matches_endpoint_uses_external_update_time_when_it_is_newer_than_pm():
     store = MemoryStore()
 
@@ -556,7 +582,7 @@ def test_pm_accounts_endpoint_returns_only_redacted_configured_accounts():
     assert "secret-relayer" not in response.text
 
 
-def test_trades_endpoint_enriches_legacy_rows_with_match_slug():
+def test_trades_endpoint_enriches_stream_rows_with_match_slug():
     store = MemoryStore()
 
     async def seed() -> None:
@@ -569,19 +595,17 @@ def test_trades_endpoint_enriches_legacy_rows_with_match_slug():
                 "away_team": "Crystal Palace Fc",
             },
         )
-        await store.set_json(
-            "trader:S001:trades",
-            [
-                {
-                    "trading_id": "S001",
-                    "side": "buy",
-                    "guid": "guid-match-1",
-                    "outcome_key": "home",
-                    "shares": 100,
-                    "price": 0.2,
-                    "ts_utc": "2026-05-03T13:08:09Z",
-                }
-            ],
+        await store.add_stream(
+            "stream:trader:S001:trades",
+            {
+                "trading_id": "S001",
+                "side": "buy",
+                "guid": "guid-match-1",
+                "outcome_key": "home",
+                "shares": 100,
+                "price": 0.2,
+                "ts_utc": "2026-05-03T13:08:09Z",
+            },
         )
 
     asyncio.run(seed())

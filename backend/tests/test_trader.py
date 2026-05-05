@@ -51,6 +51,33 @@ class FakeClobQuoteClient:
         return self.quotes[asset_id]
 
 
+class BlockingClobQuoteClient:
+    def __init__(self, block_assets: set[str] | None = None):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.block_assets = block_assets
+
+    async def get_quote(self, asset_id: str) -> dict[str, float | None]:
+        if self.block_assets is None or asset_id in self.block_assets:
+            self.started.set()
+            await self.release.wait()
+        return {"ask1": 0.64, "bid1": 0.63}
+
+
+class BlockingFirstClobQuoteClient:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def get_quote(self, asset_id: str) -> dict[str, float | None]:
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            await self.release.wait()
+        return {"ask1": 0.64, "bid1": 0.63}
+
+
 @pytest.mark.asyncio
 async def test_simulation_buy_and_sell_use_ask_and_bid_and_update_account():
     store = MemoryStore()
@@ -250,6 +277,37 @@ async def test_trader_start_hydrates_persisted_real_accounts_from_store():
     assert account.mode == "real"
     assert account.account_alias == "pm-main"
     assert account.initial_balance == 250
+
+
+@pytest.mark.asyncio
+async def test_trader_hydration_ignores_legacy_trade_and_log_json_lists():
+    store = MemoryStore()
+    original = TraderManager(store=store)
+    created = await original.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await store.set_json(
+        f"trader:{created.trading_id}:trades",
+        [{"guid": "legacy-guid", "side": "buy", "ts_utc": "2026-05-01T00:00:00Z"}],
+    )
+    await store.set_json(
+        f"trader:{created.trading_id}:logs",
+        [{"guid": "legacy-guid", "message": "legacy", "ts_utc": "2026-05-01T00:00:00Z"}],
+    )
+
+    restarted = TraderManager(store=store)
+    await restarted.start()
+
+    try:
+        assert restarted.get_trades(created.trading_id) == []
+        assert restarted.get_logs(created.trading_id) == []
+    finally:
+        await restarted.stop()
 
 
 @pytest.mark.asyncio
@@ -669,7 +727,7 @@ async def test_market_tick_channel_checks_drawdown_without_running_strategy_queu
     )
 
     assert manager.queue_size(trading.trading_id) == 0
-    assert [trade["side"] for trade in manager.get_trades(trading.trading_id)] == ["buy", "sell"]
+    await _wait_until(lambda: [trade["side"] for trade in manager.get_trades(trading.trading_id)] == ["buy", "sell"])
     assert manager.get_trades(trading.trading_id)[-1]["reason"] == "回撤0.05卖出"
 
 
@@ -715,7 +773,47 @@ async def test_market_tick_channel_uses_in_memory_quote_before_redis_snapshot():
 
     pm = await store.get_json("pm:match:guid-1")
     assert pm["home_ask1"] == 0.61
-    assert [trade["side"] for trade in manager.get_trades(trading.trading_id)] == ["buy", "sell"]
+    await _wait_until(lambda: [trade["side"] for trade in manager.get_trades(trading.trading_id)] == ["buy", "sell"])
+
+
+@pytest.mark.asyncio
+async def test_market_tick_updates_memory_without_waiting_for_slow_trade_checks():
+    store = MemoryStore()
+    await seed_market(store)
+    blocking_clob = BlockingClobQuoteClient()
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {
+                "initial_balance": 1000,
+                "risk": {"max_positions": 3, "max_fund_usage_pct": 90, "max_single_order_pct": 20},
+            },
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+    await manager.api(trading.trading_id).buy("guid-1", "home", 100)
+    manager._clob_quote_client = blocking_clob
+
+    await asyncio.wait_for(
+        manager.on_market_tick(
+            {
+                "source": "pm_market",
+                "event_type": "market_tick",
+                "guid": "guid-1",
+                "outcome_key": "home",
+                "ask1": 0.70,
+                "bid1": 0.69,
+            }
+        ),
+        timeout=0.05,
+    )
+
+    market = await manager.api(trading.trading_id).get_market("guid-1")
+    assert market["home"]["ask1"] == 0.70
+    assert not blocking_clob.started.is_set()
 
 
 @pytest.mark.asyncio
@@ -1327,7 +1425,51 @@ async def test_trader_start_processes_queued_events_in_background():
     finally:
         await manager.stop()
 
-    assert manager.get_trades(trading.trading_id)[0]["side"] == "buy"
+
+@pytest.mark.asyncio
+async def test_trader_background_processing_is_isolated_per_trader():
+    store = MemoryStore()
+    await seed_market(store)
+    blocking_clob = BlockingFirstClobQuoteClient()
+    slow_manager = TraderManager(
+        store=store,
+        clob_quote_client=blocking_clob,
+        process_interval_seconds=0.01,
+    )
+    slow = await slow_manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    fast = await slow_manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await slow_manager.start()
+    await slow_manager.start_trading(slow.trading_id)
+    await slow_manager.start_trading(fast.trading_id)
+
+    try:
+        slow_manager.on_match_signal(_asa_score_event("guid-1", 0, 0, 1, 0))
+        await asyncio.wait_for(blocking_clob.started.wait(), timeout=0.2)
+
+        async def fast_traded() -> bool:
+            for _ in range(30):
+                if slow_manager.get_trades(fast.trading_id):
+                    return True
+                await asyncio.sleep(0.01)
+            return False
+
+        assert await fast_traded() is True
+    finally:
+        await slow_manager.stop()
 
 
 @pytest.mark.asyncio

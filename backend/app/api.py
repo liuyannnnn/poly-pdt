@@ -768,12 +768,6 @@ async def _list_json_by_pattern(store: Any, pattern: str) -> list[Any]:
 
 async def _trader_rows_from_store(store: Any, kind: str) -> list[list[dict[str, Any]]]:
     rows: list[list[dict[str, Any]]] = []
-    legacy_rows = await _list_json_by_pattern(store, f"trader:*:{kind}")
-    rows.extend(
-        [row for row in group if isinstance(row, dict)]
-        for group in legacy_rows
-        if isinstance(group, list)
-    )
     for key in await store.keys(f"stream:trader:*:{kind}"):
         stream_rows = await store.stream(key)
         rows.append([row for row in stream_rows if isinstance(row, dict)])

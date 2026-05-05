@@ -96,6 +96,10 @@ class TraderManager:
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._wake_event = asyncio.Event()
+        self._trader_tasks: dict[str, asyncio.Task[None]] = {}
+        self._trader_wake_events: dict[str, asyncio.Event] = {}
+        self._market_tick_tasks: set[asyncio.Task[None]] = set()
+        self._market_tick_locks: dict[str, asyncio.Lock] = {}
         self._market_state: dict[str, dict[str, dict[str, float | None]]] = {}
 
     async def start(self) -> None:
@@ -103,8 +107,8 @@ class TraderManager:
         if self._running:
             return None
         self._running = True
-        self._task = asyncio.create_task(self._run_loop())
-        self._wake_event.set()
+        for trading_id in self._tradings:
+            self._ensure_trader_task(trading_id)
         return None
 
     async def stop(self) -> None:
@@ -116,6 +120,19 @@ class TraderManager:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        for task in list(self._trader_tasks.values()):
+            task.cancel()
+        for task in list(self._trader_tasks.values()):
+            with suppress(asyncio.CancelledError):
+                await task
+        self._trader_tasks.clear()
+        self._trader_wake_events.clear()
+        for task in list(self._market_tick_tasks):
+            task.cancel()
+        for task in list(self._market_tick_tasks):
+            with suppress(asyncio.CancelledError):
+                await task
+        self._market_tick_tasks.clear()
         self.simulation_running = False
         for instance in self._tradings.values():
             instance.snapshot = instance.snapshot.model_copy(update={"status": "stopped"})
@@ -195,17 +212,20 @@ class TraderManager:
         instance = self._get_existing_instance(trading_id)
         instance.snapshot = instance.snapshot.model_copy(update={"status": "running"})
         await self._persist_instance(instance)
+        self._ensure_trader_task(trading_id)
         return instance.snapshot
 
     async def stop_trading(self, trading_id: str) -> TradingSnapshot:
         instance = self._get_existing_instance(trading_id)
         instance.snapshot = instance.snapshot.model_copy(update={"status": "stopped"})
         await self._persist_instance(instance)
+        self._cancel_trader_task(trading_id)
         return instance.snapshot
 
     async def delete_trading(self, trading_id: str) -> bool:
         # 删除要覆盖内存和 Redis，否则前端刷新后会从持久化快照里又读回来。
         existed = self._tradings.pop(trading_id, None) is not None
+        self._cancel_trader_task(trading_id)
         if self._store is not None:
             keys = [
                 f"trader:{trading_id}:config",
@@ -262,6 +282,7 @@ class TraderManager:
         for instance in self._tradings.values():
             if instance.snapshot.status == "running":
                 instance.queue.put_nowait(event)
+                self._wake_trader(instance.snapshot.trading_id)
                 queued = True
         if queued:
             self._wake_event.set()
@@ -282,7 +303,9 @@ class TraderManager:
                 continue
             if not any(position.guid == guid and position.shares > 0 for position in instance.positions):
                 continue
-            await self._process_market_tick(instance, event)
+            task = asyncio.create_task(self._process_market_tick_in_order(instance, event))
+            self._market_tick_tasks.add(task)
+            task.add_done_callback(self._market_tick_tasks.discard)
 
     async def on_account_event(self, event: dict[str, Any]) -> None:
         """账户事件入口：PM/未来 KS user stream 直接更新对应实盘交易员账户。"""
@@ -326,26 +349,36 @@ class TraderManager:
         trades = 0
         failures = 0
         for instance in list(self._tradings.values()):
-            while not instance.queue.empty():
-                event = instance.queue.get_nowait()
-                processed += 1
-                try:
-                    new_trades = await self._process_event(instance, event)
-                    trades += new_trades
-                except Exception as exc:
-                    failures += 1
-                    instance.logs.append(
-                        {
-                            "level": "error",
-                            "source": "trader",
-                            "guid": event.get("guid"),
-                            "trader_id": instance.snapshot.trading_id,
-                            "event_type": "strategy_error",
-                            "message": str(exc),
-                            "ts_utc": _utc_now(),
-                        }
-                    )
-                    await self._persist_instance(instance)
+            result = await self._process_instance_queue(instance)
+            processed += result["processed"]
+            trades += result["trades"]
+            failures += result["failures"]
+        return {"processed": processed, "trades": trades, "failures": failures}
+
+    async def _process_instance_queue(self, instance: TraderInstance) -> dict[str, int]:
+        processed = 0
+        trades = 0
+        failures = 0
+        while not instance.queue.empty():
+            event = instance.queue.get_nowait()
+            processed += 1
+            try:
+                new_trades = await self._process_event(instance, event)
+                trades += new_trades
+            except Exception as exc:
+                failures += 1
+                instance.logs.append(
+                    {
+                        "level": "error",
+                        "source": "trader",
+                        "guid": event.get("guid"),
+                        "trader_id": instance.snapshot.trading_id,
+                        "event_type": "strategy_error",
+                        "message": str(exc),
+                        "ts_utc": _utc_now(),
+                    }
+                )
+                await self._persist_instance(instance)
         return {"processed": processed, "trades": trades, "failures": failures}
 
     async def _run_loop(self) -> None:
@@ -355,6 +388,39 @@ class TraderManager:
             self._wake_event.clear()
             with suppress(Exception):
                 await self.process_queued_events()
+
+    def _ensure_trader_task(self, trading_id: str) -> None:
+        if not self._running:
+            return
+        existing = self._trader_tasks.get(trading_id)
+        if existing is not None and not existing.done():
+            return
+        wake = self._trader_wake_events.setdefault(trading_id, asyncio.Event())
+        self._trader_tasks[trading_id] = asyncio.create_task(self._run_trader_loop(trading_id, wake))
+        wake.set()
+
+    def _wake_trader(self, trading_id: str) -> None:
+        wake = self._trader_wake_events.get(trading_id)
+        if wake is not None:
+            wake.set()
+
+    def _cancel_trader_task(self, trading_id: str) -> None:
+        task = self._trader_tasks.pop(trading_id, None)
+        self._trader_wake_events.pop(trading_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _run_trader_loop(self, trading_id: str, wake: asyncio.Event) -> None:
+        while self._running:
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(wake.wait(), timeout=self._process_interval_seconds)
+            wake.clear()
+            instance = self._tradings.get(trading_id)
+            if instance is None or instance.snapshot.status != "running":
+                await asyncio.sleep(0)
+                continue
+            with suppress(Exception):
+                await self._process_instance_queue(instance)
 
     async def persist(self, trading_id: str) -> None:
         await self._persist_instance(self._get_existing_instance(trading_id))
@@ -438,18 +504,16 @@ class TraderManager:
                 for row in positions_row
                 if isinstance(row, dict)
             ]
-            legacy_trades = await self._store.get_json(f"trader:{trading_id}:trades") or []
             stream_trades = await self._store.stream(f"stream:trader:{trading_id}:trades")
             trades = [
                 row
-                for row in [*(legacy_trades if isinstance(legacy_trades, list) else []), *stream_trades]
+                for row in stream_trades
                 if isinstance(row, dict)
             ]
-            legacy_logs = await self._store.get_json(f"trader:{trading_id}:logs") or []
             stream_logs = await self._store.stream(f"stream:trader:{trading_id}:logs")
             logs = [
                 row
-                for row in [*(legacy_logs if isinstance(legacy_logs, list) else []), *stream_logs]
+                for row in stream_logs
                 if isinstance(row, dict)
             ]
             self._tradings[trading_id] = TraderInstance(
@@ -489,11 +553,16 @@ class TraderManager:
         api = self.api(instance.snapshot.trading_id)
         pm = await api.get_pm_match(guid) or {}
         gs = await api.get_gs_match(guid) or {}
-        intents = await _position_exit_intents(api, guid, pm, gs)
+        intents = await _position_exit_intents(api, guid, pm, gs, market_tick=event)
         trades = await self._execute_intents(instance, intents)
         # 即使没有触发卖出，tick 也可能更新持仓 peak/current 估值，需要保留到内存/Redis 快照。
         await self._persist_instance(instance)
         return trades
+
+    async def _process_market_tick_in_order(self, instance: TraderInstance, event: dict[str, Any]) -> int:
+        lock = self._market_tick_locks.setdefault(instance.snapshot.trading_id, asyncio.Lock())
+        async with lock:
+            return await self._process_market_tick(instance, event)
 
     async def _execute_intents(self, instance: TraderInstance, intents: list[dict[str, Any]]) -> int:
         api = self.api(instance.snapshot.trading_id)
@@ -1343,12 +1412,21 @@ async def _position_exit_intents(
     guid: str,
     pm: dict[str, Any],
     gs: dict[str, Any],
+    *,
+    use_clob: bool = False,
+    market_tick: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     intents: list[dict[str, Any]] = []
     finished = _is_finished(pm, gs)
     drawdown = max(0.0, float(api._instance.risk.stop_loss_drawdown))
     for position in [item for item in api.get_positions() if item.guid == guid and item.shares > 0]:
-        quote = await api._quote(guid, position.outcome_key, log_difference=False)
+        if market_tick and market_tick.get("outcome_key") == position.outcome_key:
+            quote = {
+                "bid1": market_tick.get("bid1"),
+                "ask1": market_tick.get("ask1"),
+            }
+        else:
+            quote = await api._quote(guid, position.outcome_key, use_clob=use_clob, log_difference=False)
         bid = _optional_number(quote.get("bid1"))
         ask = _optional_number(quote.get("ask1"))
         if bid is None or ask is None:
