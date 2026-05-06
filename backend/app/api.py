@@ -246,7 +246,7 @@ async def match_snapshots(
 async def accounts(request: Request) -> list[dict[str, Any]]:
     timezone_name = request.app.state.settings.auth_timezone
     pm_accounts = await _pm_accounts_by_alias(request)
-    memory_rows = _accounts_from_trader(_trader(request), timezone_name, pm_accounts)
+    memory_rows = await _accounts_from_trader(_trader(request), timezone_name, pm_accounts, request.app.state.store)
     if memory_rows:
         return memory_rows
     rows = []
@@ -302,7 +302,13 @@ async def trades(
                     continue
                 rows.append({"source": "pm", "trading_id": snapshot.trading_id, **trade})
             continue
-        for trade in _trader(request).get_trades(snapshot.trading_id):
+        trade_rows = await _stream_rows_for_trader(
+            request.app.state.store,
+            snapshot.trading_id,
+            "trades",
+            limit=None if match_id else limit,
+        ) or _trader(request).get_trades(snapshot.trading_id)
+        for trade in trade_rows:
             if match_id and trade.get("guid") != match_id:
                 continue
             rows.append({"trading_id": snapshot.trading_id, **trade})
@@ -310,7 +316,11 @@ async def trades(
         rows = await _enrich_trading_rows(request.app.state.store, rows)
         return sorted(rows, key=lambda row: str(row.get("ts_utc") or ""), reverse=True)[:limit]
     if not rows:
-        store_rows = await _trader_rows_from_store(request.app.state.store, "trades")
+        store_rows = await _trader_rows_from_store(
+            request.app.state.store,
+            "trades",
+            limit=None if match_id else limit,
+        )
         rows = [row for group in store_rows for row in group]
         if trading_id:
             rows = [
@@ -339,8 +349,16 @@ async def logs(
             if match_id and row.get("guid") != match_id:
                 continue
             rows.append(row)
+        for row in await request.app.state.store.stream("stream:system_logs", limit=limit):
+            if match_id and row.get("guid") != match_id:
+                continue
+            rows.append(row)
 
-    store_rows = await _trader_rows_from_store(request.app.state.store, "logs")
+    store_rows = await _trader_rows_from_store(
+        request.app.state.store,
+        "logs",
+        limit=None if match_id else limit,
+    )
     if store_rows:
         trader_rows = [row for group in store_rows for row in group]
         if trading_id:
@@ -766,12 +784,22 @@ async def _list_json_by_pattern(store: Any, pattern: str) -> list[Any]:
     return [value for value in await _get_many_json(store, keys) if value]
 
 
-async def _trader_rows_from_store(store: Any, kind: str) -> list[list[dict[str, Any]]]:
+async def _trader_rows_from_store(store: Any, kind: str, limit: int | None = None) -> list[list[dict[str, Any]]]:
     rows: list[list[dict[str, Any]]] = []
     for key in await store.keys(f"stream:trader:*:{kind}"):
-        stream_rows = await store.stream(key)
+        stream_rows = await store.stream(key, limit=limit)
         rows.append([row for row in stream_rows if isinstance(row, dict)])
     return rows
+
+
+async def _stream_rows_for_trader(
+    store: Any,
+    trading_id: str,
+    kind: str,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    rows = await store.stream(f"stream:trader:{trading_id}:{kind}", limit=limit)
+    return [row for row in rows if isinstance(row, dict)]
 
 
 async def _accounts_from_store(
@@ -830,14 +858,20 @@ async def _accounts_from_store(
     return rows
 
 
-def _accounts_from_trader(
+async def _accounts_from_trader(
     trader: Any,
     timezone_name: str,
     pm_accounts: dict[str, dict[str, Any]] | None = None,
+    store: Any | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for snapshot in trader.list_tradings():
         account = trader.get_account(snapshot.trading_id)
+        trades = (
+            await _stream_rows_for_trader(store, snapshot.trading_id, "trades")
+            if store is not None
+            else trader.get_trades(snapshot.trading_id)
+        )
         row = {
             "id": snapshot.trading_id,
             "mode": snapshot.mode,
@@ -848,9 +882,9 @@ def _accounts_from_trader(
             "affect_sports": snapshot.affect_sports,
             "total_assets": account.equity,
             "available_cash": account.available_cash,
-            "today_profit": _today_realized_profit(trader.get_trades(snapshot.trading_id), timezone_name),
+            "today_profit": _today_realized_profit(trades, timezone_name),
             "position_count": account.position_count,
-            "win_rate": _sell_win_rate(trader.get_trades(snapshot.trading_id)),
+            "win_rate": _sell_win_rate(trades),
             "is_running": snapshot.status == "running",
             "account_alias": account.account_alias,
         }

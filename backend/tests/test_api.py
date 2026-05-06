@@ -621,6 +621,31 @@ def test_trades_endpoint_enriches_stream_rows_with_match_slug():
     assert row["team_name"] == "Afc Bournemouth"
 
 
+def test_logs_endpoint_includes_system_logs():
+    store = MemoryStore()
+
+    async def seed() -> None:
+        await store.add_stream(
+            "stream:system_logs",
+            {
+                "source": "SYS",
+                "component": "timeseries_resampler",
+                "level": "error",
+                "message": "boom",
+                "ts_utc": "2026-05-03T13:08:09Z",
+            },
+        )
+
+    asyncio.run(seed())
+    isolated_app = create_app(store=store)
+
+    with TestClient(isolated_app) as client:
+        response = client.get("/api/v1/logs")
+
+    assert response.status_code == 200
+    assert response.json()[-1]["source"] == "SYS"
+
+
 def test_trades_endpoint_does_not_mix_stale_store_rows_after_trader_hydration():
     store = MemoryStore()
 

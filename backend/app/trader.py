@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from datetime import UTC, datetime
@@ -18,6 +19,8 @@ WINRATE_GAP_STRATEGY = "football_winrate_gap_buy"
 SUPPORTED_STRATEGY = SCORE_DELAY_STRATEGY
 SUPPORTED_STRATEGIES = {SCORE_DELAY_STRATEGY, WINRATE_GAP_STRATEGY}
 SUPPORTED_SPORTS = ["football"]
+TRADER_EVENT_QUEUE_MAX_SIZE = 1000
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,7 +75,9 @@ class TraderInstance:
     snapshot: TradingSnapshot
     account: Account
     risk: RiskLimits
-    queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+    queue: asyncio.Queue[dict[str, Any]] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=TRADER_EVENT_QUEUE_MAX_SIZE)
+    )
     positions: list[Position] = field(default_factory=list)
     trades: list[dict[str, Any]] = field(default_factory=list)
     logs: list[dict[str, Any]] = field(default_factory=list)
@@ -97,6 +102,8 @@ class TraderManager:
         self._trader_tasks: dict[str, asyncio.Task[None]] = {}
         self._trader_wake_events: dict[str, asyncio.Event] = {}
         self._market_tick_tasks: set[asyncio.Task[None]] = set()
+        self._market_tick_running: set[tuple[str, str]] = set()
+        self._market_tick_latest: dict[tuple[str, str], dict[str, Any]] = {}
         self._market_tick_locks: dict[str, asyncio.Lock] = {}
         self._market_state: dict[str, dict[str, dict[str, float | None]]] = {}
 
@@ -124,6 +131,8 @@ class TraderManager:
             with suppress(asyncio.CancelledError):
                 await task
         self._market_tick_tasks.clear()
+        self._market_tick_running.clear()
+        self._market_tick_latest.clear()
         self.simulation_running = False
         for instance in self._tradings.values():
             instance.snapshot = instance.snapshot.model_copy(update={"status": "stopped"})
@@ -271,8 +280,17 @@ class TraderManager:
 
         for instance in self._tradings.values():
             if instance.snapshot.status == "running":
-                instance.queue.put_nowait(event)
-                self._wake_trader(instance.snapshot.trading_id)
+                try:
+                    instance.queue.put_nowait(event)
+                    self._wake_trader(instance.snapshot.trading_id)
+                except asyncio.QueueFull:
+                    self._append_runtime_log(
+                        instance,
+                        "error",
+                        event.get("guid"),
+                        "交易员事件队列已满，丢弃比赛信号",
+                        event,
+                    )
 
     def enqueue_event(self, event: dict[str, Any]) -> None:
         # 手动注入比赛信号的测试/soak 入口；盘口 tick 不走这里。
@@ -290,9 +308,7 @@ class TraderManager:
                 continue
             if not any(position.guid == guid and position.shares > 0 for position in instance.positions):
                 continue
-            task = asyncio.create_task(self._process_market_tick_in_order(instance, event))
-            self._market_tick_tasks.add(task)
-            task.add_done_callback(self._market_tick_tasks.discard)
+            self._queue_market_tick(instance, event)
 
     async def on_account_event(self, event: dict[str, Any]) -> None:
         """账户事件入口：PM/未来 KS user stream 直接更新对应实盘交易员账户。"""
@@ -398,8 +414,10 @@ class TraderManager:
             if instance is None or instance.snapshot.status != "running":
                 await asyncio.sleep(0)
                 continue
-            with suppress(Exception):
+            try:
                 await self._process_instance_queue(instance)
+            except Exception as exc:
+                await self._write_system_error("trader_loop", exc, trading_id=trading_id)
 
     async def persist(self, trading_id: str) -> None:
         await self._persist_instance(self._get_existing_instance(trading_id))
@@ -483,28 +501,16 @@ class TraderManager:
                 for row in positions_row
                 if isinstance(row, dict)
             ]
-            stream_trades = await self._store.stream(f"stream:trader:{trading_id}:trades")
-            trades = [
-                row
-                for row in stream_trades
-                if isinstance(row, dict)
-            ]
-            stream_logs = await self._store.stream(f"stream:trader:{trading_id}:logs")
-            logs = [
-                row
-                for row in stream_logs
-                if isinstance(row, dict)
-            ]
             self._tradings[trading_id] = TraderInstance(
                 snapshot=snapshot,
                 account=account,
                 risk=_risk_from_params(snapshot.strategy_params or {}),
                 positions=positions,
-                trades=trades,
-                logs=logs,
+                trades=[],
+                logs=[],
                 account_alias=account.account_alias,
-                persisted_trade_count=len(trades),
-                persisted_log_count=len(logs),
+                persisted_trade_count=0,
+                persisted_log_count=0,
             )
 
     async def _process_event(self, instance: TraderInstance, event: dict[str, Any]) -> int:
@@ -542,6 +548,87 @@ class TraderManager:
         lock = self._market_tick_locks.setdefault(instance.snapshot.trading_id, asyncio.Lock())
         async with lock:
             return await self._process_market_tick(instance, event)
+
+    def _queue_market_tick(self, instance: TraderInstance, event: dict[str, Any]) -> None:
+        key = (instance.snapshot.trading_id, str(event.get("guid") or ""))
+        if key in self._market_tick_running:
+            self._market_tick_latest[key] = dict(event)
+            return
+        self._market_tick_running.add(key)
+        task = asyncio.create_task(self._drain_market_ticks(instance.snapshot.trading_id, key, dict(event)))
+        self._market_tick_tasks.add(task)
+        task.add_done_callback(self._market_tick_tasks.discard)
+
+    async def _drain_market_ticks(self, trading_id: str, key: tuple[str, str], first_event: dict[str, Any]) -> None:
+        event: dict[str, Any] | None = first_event
+        try:
+            while True:
+                if event is None:
+                    return
+                instance = self._tradings.get(trading_id)
+                if instance is None or instance.snapshot.status != "running":
+                    return
+                await self._process_market_tick_in_order(instance, event)
+                event = self._market_tick_latest.pop(key, None)
+        except Exception as exc:
+            await self._write_system_error("market_tick_worker", exc, trading_id=trading_id, guid=key[1])
+        finally:
+            self._market_tick_running.discard(key)
+            instance = self._tradings.get(trading_id)
+            if (
+                key in self._market_tick_latest
+                and instance is not None
+                and instance.snapshot.status == "running"
+                and key not in self._market_tick_running
+            ):
+                self._queue_market_tick(instance, self._market_tick_latest[key])
+
+    def _append_runtime_log(
+        self,
+        instance: TraderInstance,
+        level: str,
+        guid: Any,
+        message: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        instance.logs.append(
+            {
+                "level": level,
+                "source": "trader",
+                "guid": guid,
+                "trader_id": instance.snapshot.trading_id,
+                "event_type": "runtime_log",
+                "message": message,
+                "payload": payload or {},
+                "ts_utc": _utc_now(),
+            }
+        )
+
+    async def _write_system_error(
+        self,
+        component: str,
+        exc: Exception,
+        *,
+        trading_id: str | None = None,
+        guid: str | None = None,
+    ) -> None:
+        logger.error("%s failed", component, exc_info=(type(exc), exc, exc.__traceback__))
+        if self._store is None or not hasattr(self._store, "add_stream"):
+            return
+        with suppress(Exception):
+            await self._store.add_stream(
+                "stream:system_logs",
+                {
+                    "source": "SYS",
+                    "component": component,
+                    "level": "error",
+                    "trading_id": trading_id,
+                    "guid": guid,
+                    "error_type": exc.__class__.__name__,
+                    "message": str(exc),
+                    "ts_utc": _utc_now(),
+                },
+            )
 
     async def _execute_intents(self, instance: TraderInstance, intents: list[dict[str, Any]]) -> int:
         api = self.api(instance.snapshot.trading_id)

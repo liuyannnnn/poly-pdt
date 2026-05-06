@@ -30,13 +30,15 @@ Redis 是 PDT2.1 第一版唯一运行存储。设计目标不是做复杂数据
 | LIVE 原始 ticks | `series:pm:ticks:{guid}` | PM market WS 比赛中收到的原始行情 ticks 追加点 | `guid`, `received_at_utc`, `asset_id`, `outcome_key`, `ask1`, `bid1`, `raw_ref` |
 | LIVE 10 秒曲线 | `series:pm:10s:{guid}` | 后台每 10 秒从 ticks 中按真实收到的数据重采样出的展示点 | `guid`, `sample_ts_utc`, `home/draw/away_ask1`, `home/draw/away_bid1` |
 | 比赛变化事件 | `stream:standard_events` | 判别器输出的比赛信号，给交易模块和审计/恢复用 | `source`, `guid`, `event_type`, `old_value`, `new_value`, `pm_score_home_at_event`, `pm_score_away_at_event`, `received_at_utc` |
-| 比赛/策略日志 | `stream:match_logs` | 只追加赛况关键变化、交易员买卖/不交易理由、系统异常 | `source`, `guid`, `trader_id`, `level`, `message`, `ts_utc` |
+| 比赛日志 | `stream:match_logs` | 只追加赛况关键变化 | `source`, `data_source`, `guid`, `level`, `message`, `ts_utc` |
+| 系统日志 | `stream:system_logs` | 后台任务、交易员循环、重采样等系统异常 | `source=SYS`, `component`, `guid`, `trading_id`, `level`, `message`, `ts_utc` |
 | 未识别消息 | `stream:dead_letters` | 无法解析 `guid` 或不支持 source 的消息 | `source`, `reason`, `payload`, `ts_utc` |
 | 订单/成交流 | `stream:orders`, `stream:fills` | PM user WS、后续 KS user WS 或 dry-run 产生的订单、成交记录 | `provider`, `account_alias`, `trader_id`, `order_id`, `fill_id`, `guid`, `asset_id`, `price`, `size`, `status`, `ts_utc` |
 | 外部账户 | `account:{provider}:{alias}` | PM user WS/PM API 回填的账户快照；后续 KS 使用同样模式 | `provider`, `account_alias`, `balance`, `available_cash`, `positions`, `updated_at_utc` |
 | 账号事件 | `stream:account_events:{provider}:{alias}` | user WS 标准化后的账号、订单、成交事件，直接路由给对应交易员 | `provider`, `account_alias`, `event_type`, `order_id`, `fill_id`, `payload_ref`, `ts_utc` |
 | Trader 配置/状态 | `trader:{trader_id}:config`, `trader:{trader_id}:state` | 交易实例配置和运行状态 | `trader_id`, `mode`, `provider`, `account_alias`, `strategy_name`, `strategy_params`, `common_params`, `status` |
-| Trader 账户/持仓/交易/日志 | `trader:{trader_id}:account`, `trader:{trader_id}:positions`, `trader:{trader_id}:trades`, `trader:{trader_id}:logs` | simulation/dry-run 交易内部账本；实盘展示以 provider 返回为准，本地只做必要缓存 | `provider`, `account_alias`, `available_cash`, `positions`, `trades`, `logs`, `realized_pnl`, `unrealized_pnl` |
+| Trader 账户/持仓 | `trader:{trader_id}:account`, `trader:{trader_id}:positions` | simulation/dry-run 当前账本；实盘展示以 provider 返回为准，本地只做必要缓存 | `provider`, `account_alias`, `available_cash`, `positions`, `realized_pnl`, `unrealized_pnl` |
+| Trader 交易/日志 | `stream:trader:{trader_id}:trades`, `stream:trader:{trader_id}:logs` | 交易记录和交易员运行日志按 stream 追加；删除交易员时删除 | `trading_id`, `guid`, `order_id`, `side`, `reason`, `profit`, `message`, `ts_utc` |
 
 ## 3. 索引
 
@@ -90,9 +92,11 @@ idx:traders -> latest trader id
 - `stream:match_logs`
 - `stream:dead_letters`
 
-LIVE 原始 ticks 保留 24 小时：
+LIVE 原始 ticks 调试期保留 72 小时：
 
 - `series:pm:ticks:{guid}`
+
+后续稳定后可按运行策略改回更短 TTL，例如 30 秒。
 
 短 TTL 当前态：
 
@@ -105,8 +109,8 @@ LIVE 原始 ticks 保留 24 小时：
 - `trader:{trader_id}:state`
 - `trader:{trader_id}:account`
 - `trader:{trader_id}:positions`
-- `trader:{trader_id}:trades`
-- `trader:{trader_id}:logs`
+- `stream:trader:{trader_id}:trades`
+- `stream:trader:{trader_id}:logs`
 - `account:{provider}:{alias}`
 - `stream:orders`
 - `stream:fills`
@@ -207,7 +211,7 @@ source
 使用规则：
 
 - Listener 收到 PM market tick 后，先标准化并更新 `MarketState`。
-- 然后异步追加 Redis ticks/当前盘口，并异步推送前端和交易员。
+- 然后追加 Redis ticks/当前盘口，并推送前端和交易员。
 - 交易员或策略查询盘口时，只通过交易模块 API 查询 `MarketState`。
 - 买入/卖出前，交易模块再查一次 PM CLOB。
 - 买入只比较 ask1，使用 WS/内存 ask1 与 CLOB ask1 中更高的价格。
@@ -225,16 +229,18 @@ series:pm:ticks:{guid}
 series:pm:10s:{guid}
 stream:standard_events
 stream:match_logs
+stream:system_logs
 stream:orders
 stream:fills
-trader:{trader_id}:trades
-trader:{trader_id}:logs
+stream:trader:{trader_id}:trades
+stream:trader:{trader_id}:logs
 ```
 
 约束：
 
 - 不为了修正历史展示，把旧记录取出来再修改后写回。
 - 不删除或过滤已写入的历史日志。
+- 如果追加写入发现 key 类型不是预期 list/stream，必须报错和写系统日志，不能自动删除或转换旧 key。
 - 新格式只影响新写入记录。
 - 图表直接显示 Redis 中真实存在的点。
 - ALL 图表只读 `series:pm:collector:{guid}`。

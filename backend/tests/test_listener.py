@@ -54,6 +54,14 @@ class RecordingTraderManager:
         self.account_events.append(event)
 
 
+class RecordingResampler:
+    def __init__(self):
+        self.rows = []
+
+    def observe_tick(self, row):
+        self.rows.append(row)
+
+
 @pytest.mark.asyncio
 async def test_broadcast_hub_fans_out_messages_to_each_subscriber():
     hub = BroadcastHub()
@@ -69,6 +77,22 @@ async def test_broadcast_hub_fans_out_messages_to_each_subscriber():
     finally:
         first.close()
         second.close()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_hub_keeps_only_bounded_debug_history():
+    hub = BroadcastHub(history_limit=2)
+    subscription = hub.subscribe()
+
+    try:
+        await hub.publish({"topic": "one"})
+        await hub.publish({"topic": "two"})
+        await hub.publish({"topic": "three"})
+
+        assert await subscription.drain() == [{"topic": "one"}, {"topic": "two"}, {"topic": "three"}]
+        assert await hub.drain() == [{"topic": "two"}, {"topic": "three"}]
+    finally:
+        subscription.close()
 
 
 @pytest.mark.asyncio
@@ -105,7 +129,8 @@ async def test_listener_updates_pm_market_without_overwriting_gs_state_and_broad
     await store.set_json(f"pm:match:{guid}", {**pm, "status": "live"})
     hub = BroadcastHub()
     trader = RecordingTraderManager()
-    listener = Listener(store=store, broadcaster=hub, trader_manager=trader)
+    resampler = RecordingResampler()
+    listener = Listener(store=store, broadcaster=hub, trader_manager=trader, timeseries_resampler=resampler)
     tick_ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     event = await listener.process_payload(
@@ -143,6 +168,8 @@ async def test_listener_updates_pm_market_without_overwriting_gs_state_and_broad
     assert ticks[-1]["home_ask"] == 0.53
     assert ticks[-1]["draw_ask"] == 0.27
     assert ticks[-1]["away_ask"] == 0.33
+    assert resampler.rows[-1]["snapshot_ts_utc"] == tick_ts
+    assert resampler.rows[-1]["home_ask"] == 0.53
     assert await store.ttl(f"series:pm:ticks:{guid}") == MATCH_RELATED_TTL_SECONDS
     assert broadcasts[-1]["topic"] == "market.tick"
     assert broadcasts[-1]["payload"]["match_id"] == guid

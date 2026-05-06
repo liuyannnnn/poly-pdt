@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -58,8 +59,8 @@ class BroadcastSubscription:
 
 
 class BroadcastHub:
-    def __init__(self):
-        self._messages: list[dict[str, Any]] = []
+    def __init__(self, history_limit: int = 1000):
+        self._messages: deque[dict[str, Any]] = deque(maxlen=max(0, history_limit))
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
 
     def subscribe(self) -> BroadcastSubscription:
@@ -68,7 +69,8 @@ class BroadcastHub:
         return BroadcastSubscription(self, queue)
 
     async def publish(self, message: dict[str, Any]) -> None:
-        self._messages.append(message)
+        if self._messages.maxlen != 0:
+            self._messages.append(message)
         for queue in tuple(self._subscribers):
             if queue.full():
                 with suppress(asyncio.QueueEmpty):
@@ -91,6 +93,7 @@ class Listener:
         broadcaster: BroadcastHub | None = None,
         trader_manager: Any | None = None,
         discriminator: MatchDiscriminator | None = None,
+        timeseries_resampler: Any | None = None,
         sources: list[ListenerSource] | None = None,
         reconnect_delay_seconds: float = 1.0,
     ):
@@ -98,6 +101,7 @@ class Listener:
         self._broadcaster = broadcaster or BroadcastHub()
         self._trader_manager = trader_manager
         self._discriminator = discriminator
+        self._timeseries_resampler = timeseries_resampler
         self._sources = sources or []
         self._reconnect_delay_seconds = reconnect_delay_seconds
         self._running = False
@@ -209,6 +213,8 @@ class Listener:
         guid, outcome = index.split("|", 1)
         previous = await self._store.get_json(f"pm:match:{guid}") or {}
         if not _is_live_status(previous.get("status")):
+            if _finished_for_more_than(previous, payload.get("ts"), minutes=15):
+                self._forget_timeseries_match(guid)
             return None
         next_pm = dict(previous)
         bid = _optional_float(payload.get("bid"))
@@ -219,7 +225,13 @@ class Listener:
             next_pm[f"{outcome}_ask1"] = ask
         next_pm["updated_at_utc"] = normalize_ts(payload.get("ts"))
         await self._store.set_json(f"pm:match:{guid}", next_pm, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
-        await append_pm_tick_snapshot(self._store, guid, next_pm, next_pm["updated_at_utc"])
+        tick_row = await append_pm_tick_snapshot(
+            self._store,
+            guid,
+            next_pm,
+            next_pm["updated_at_utc"],
+            before_persist=self._observe_tick_before_persist,
+        )
         await self._store.set_json(
             f"orderbook:{guid}:{outcome}",
             {
@@ -266,6 +278,14 @@ class Listener:
         if self._trader_manager is not None and hasattr(self._trader_manager, "on_market_tick"):
             await self._trader_manager.on_market_tick(event)
         return event
+
+    def _observe_tick_before_persist(self, row: dict[str, Any]) -> None:
+        if self._timeseries_resampler is not None and hasattr(self._timeseries_resampler, "observe_tick"):
+            self._timeseries_resampler.observe_tick(row)
+
+    def _forget_timeseries_match(self, guid: str) -> None:
+        if self._timeseries_resampler is not None and hasattr(self._timeseries_resampler, "forget_match"):
+            self._timeseries_resampler.forget_match(guid)
 
     async def _process_asa_live(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         payload = normalize_allsportsapi_ws_payload(payload)
@@ -456,6 +476,7 @@ class Listener:
             "status_source": source,
         }
         await self._store.set_json(f"pm:match:{guid}", next_pm, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
+        self._forget_timeseries_match(guid)
         if self._broadcaster is not None:
             await self._broadcaster.publish({"topic": "match.snapshot", "payload": _pm_match_snapshot(guid, next_pm)})
 

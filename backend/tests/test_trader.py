@@ -311,6 +311,39 @@ async def test_trader_hydration_ignores_legacy_trade_and_log_json_lists():
 
 
 @pytest.mark.asyncio
+async def test_trader_hydration_does_not_load_stream_history_into_memory():
+    store = MemoryStore()
+    original = TraderManager(store=store)
+    created = await original.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {"initial_balance": 1000},
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await store.add_stream(
+        f"stream:trader:{created.trading_id}:trades",
+        {"trading_id": created.trading_id, "side": "buy", "guid": "old-guid"},
+        max_len=None,
+    )
+    await store.add_stream(
+        f"stream:trader:{created.trading_id}:logs",
+        {"trading_id": created.trading_id, "message": "old log"},
+        max_len=None,
+    )
+
+    restarted = TraderManager(store=store)
+    await restarted.start()
+
+    try:
+        assert restarted.get_trades(created.trading_id) == []
+        assert restarted.get_logs(created.trading_id) == []
+    finally:
+        await restarted.stop()
+
+
+@pytest.mark.asyncio
 async def test_trader_validator_rejects_missing_quote_and_risk_breaches():
     store = MemoryStore()
     await seed_market(store)
@@ -814,6 +847,66 @@ async def test_market_tick_updates_memory_without_waiting_for_slow_trade_checks(
     market = await manager.api(trading.trading_id).get_market("guid-1")
     assert market["home"]["ask1"] == 0.70
     assert not blocking_clob.started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_market_tick_processing_coalesces_when_previous_check_is_still_running():
+    store = MemoryStore()
+    await seed_market(store)
+    blocking_clob = BlockingClobQuoteClient()
+    manager = TraderManager(store=store)
+    trading = await manager.create_trading(
+        {
+            "strategy_name": "football_score_delay_trade",
+            "strategy_params": {
+                "initial_balance": 1000,
+                "risk": {"max_positions": 3, "max_fund_usage_pct": 90, "max_single_order_pct": 20},
+            },
+            "affect_sports": ["football"],
+            "mode": "simulation",
+        }
+    )
+    await manager.start_trading(trading.trading_id)
+    await manager.api(trading.trading_id).buy("guid-1", "home", 100)
+    manager._clob_quote_client = blocking_clob
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.70,
+            "bid1": 0.69,
+        }
+    )
+    await _wait_until(lambda: manager.get_positions(trading.trading_id)[0].peak_price == 0.70)
+
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.64,
+            "bid1": 0.63,
+        }
+    )
+    await asyncio.wait_for(blocking_clob.started.wait(), timeout=0.2)
+    await manager.on_market_tick(
+        {
+            "source": "pm_market",
+            "event_type": "market_tick",
+            "guid": "guid-1",
+            "outcome_key": "home",
+            "ask1": 0.63,
+            "bid1": 0.62,
+        }
+    )
+
+    assert len(manager._market_tick_tasks) == 1
+
+    blocking_clob.release.set()
+    await _wait_until(lambda: not manager._market_tick_tasks)
 
 
 @pytest.mark.asyncio

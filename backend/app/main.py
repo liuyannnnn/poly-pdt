@@ -115,21 +115,22 @@ def create_app(
                 timezone_name=app_settings.auth_timezone,
             )
         )
+    app_connectivity_checker = connectivity_checker or ConnectivityChecker(settings=app_settings)
+    app_auth_manager = auth_manager or AuthManager(store=app_store, settings=app_settings)
+    app_timeseries_resampler = TimeseriesResampler(store=app_store, broadcaster=app_broadcaster)
     app_listener = listener or Listener(
         store=app_store,
         broadcaster=app_broadcaster,
         trader_manager=app_trader,
+        timeseries_resampler=app_timeseries_resampler,
         sources=listener_sources,
     )
-    app_connectivity_checker = connectivity_checker or ConnectivityChecker(settings=app_settings)
     app_soak_runner = soak_runner or DryRunSoakRunner(
         store=app_store,
         collector=app_collector,
         listener=app_listener,
         trader_manager=app_trader,
     )
-    app_auth_manager = auth_manager or AuthManager(store=app_store, settings=app_settings)
-    app_timeseries_resampler = TimeseriesResampler(store=app_store, broadcaster=app_broadcaster)
     runtime = Runtime([app_collector, app_listener, app_timeseries_resampler, app_trader])
 
     @asynccontextmanager

@@ -81,15 +81,16 @@ class RedisStore:
         payload = json.dumps(redact_sensitive(value), ensure_ascii=False, separators=(",", ":"))
         await self.client.set(key, payload, ex=ttl_seconds)
 
-    async def append_json_list_item(self, key: str, value: Any, *, ttl_seconds: int, max_rows: int) -> None:
+    async def append_json_list_item(self, key: str, value: Any, *, ttl_seconds: int, max_rows: int | None) -> None:
         # 高频 tick 只能追加，不能每条都读出整段 JSON 再写回 Redis。
         key_type = await self.client.type(key)
         if key_type not in {"none", "list"}:
-            await self.client.delete(key)
+            raise TypeError(f"append_json_list_item expected list key, got {key_type} for {key}")
         payload = json.dumps(redact_sensitive(value), ensure_ascii=False, separators=(",", ":"))
         pipe = self.client.pipeline()
         pipe.rpush(key, payload)
-        pipe.ltrim(key, -max_rows, -1)
+        if max_rows is not None and max_rows > 0:
+            pipe.ltrim(key, -max_rows, -1)
         pipe.expire(key, ttl_seconds)
         await pipe.execute()
 
@@ -194,10 +195,15 @@ class MemoryStore:
             ttl_seconds=ttl_seconds,
         )
 
-    async def append_json_list_item(self, key: str, value: Any, *, ttl_seconds: int, max_rows: int) -> None:
-        rows = await self.get_json_list(key)
+    async def append_json_list_item(self, key: str, value: Any, *, ttl_seconds: int, max_rows: int | None) -> None:
+        existing = await self.get_json(key)
+        if existing is not None and not isinstance(existing, list):
+            raise TypeError(f"append_json_list_item expected list key, got value for {key}")
+        rows = existing or []
         rows.append(redact_sensitive(value))
-        await self.set_json_list(key, rows[-max_rows:], ttl_seconds=ttl_seconds)
+        if max_rows is not None and max_rows > 0:
+            rows = rows[-max_rows:]
+        await self.set_json_list(key, rows, ttl_seconds=ttl_seconds)
 
     async def get_json_list(self, key: str, limit: int | None = None) -> list[Any]:
         value = await self.get_json(key)
