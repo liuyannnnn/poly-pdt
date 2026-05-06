@@ -313,6 +313,7 @@ class Listener:
         await self._store.set_json(f"asa:match:{guid}", next_asa, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._store.set_json(f"external:match:{guid}", next_asa, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._publish_external_match(guid, next_asa)
+        await self._mark_pm_finished_from_external(guid, next_asa, source="asa_live")
         event = await self._discriminator.process_external_state(
             source="asa_live",
             guid=guid,
@@ -414,6 +415,7 @@ class Listener:
         await self._store.set_json(f"gs:match:{guid}", next_gs, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._store.set_json(f"external:match:{guid}", next_gs, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
         await self._publish_external_match(guid, next_gs)
+        await self._mark_pm_finished_from_external(guid, next_gs, source="gs_live")
         event = await self._discriminator.process_external_state(
             source="gs_live",
             guid=guid,
@@ -438,6 +440,24 @@ class Listener:
         # 外部源每次标准化后都推送当前状态；是否发生赛况变化交给判别器内存比较。
         if self._broadcaster is not None:
             await self._broadcaster.publish({"topic": "external.match", "payload": {"guid": guid, **state}})
+
+    async def _mark_pm_finished_from_external(self, guid: str, state: dict[str, Any], *, source: str) -> None:
+        if not _is_finished_status(state.get("status")):
+            return
+        pm = await self._store.get_json(f"pm:match:{guid}") or {}
+        if not pm or _is_finished_status(pm.get("status")):
+            return
+        finished_at = normalize_ts(state.get("updated_at_utc") or state.get("ts") or _utc_now())
+        next_pm = {
+            **pm,
+            "status": "finished",
+            "finished_at_utc": finished_at,
+            "updated_at_utc": finished_at,
+            "status_source": source,
+        }
+        await self._store.set_json(f"pm:match:{guid}", next_pm, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
+        if self._broadcaster is not None:
+            await self._broadcaster.publish({"topic": "match.snapshot", "payload": _pm_match_snapshot(guid, next_pm)})
 
     async def _process_pm_user(self, payload: dict[str, Any]) -> dict[str, Any]:
         alias = payload.get("account_alias") or "default"
@@ -613,6 +633,36 @@ def _with_pm_score_snapshot(payload: dict[str, Any], pm: dict[str, Any]) -> dict
 
 def _is_finished_status(value: Any) -> bool:
     return str(value or "").strip().lower() in {"finished", "final", "ended", "closed", "complete", "completed"}
+
+
+def _pm_match_snapshot(guid: str, pm: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "match_id": guid,
+        "sport": "football",
+        "league": pm.get("league") or "",
+        "team_home": pm.get("home_team") or "",
+        "team_away": pm.get("away_team") or "",
+        "home_logo_url": pm.get("home_logo_url"),
+        "away_logo_url": pm.get("away_logo_url"),
+        "start_time_utc": pm.get("start_time_utc") or "",
+        "status": pm.get("status") or "",
+        "moneyline_volume": pm.get("moneyline_volume") or 0,
+        "total_volume": pm.get("total_volume") or 0,
+        "latest_ts_utc": pm.get("updated_at_utc") or _utc_now(),
+        "score_home": pm.get("score_home"),
+        "score_away": pm.get("score_away"),
+        "pm_match_time": pm.get("match_time"),
+        "external_event_id": pm.get("pm_event_id"),
+        "external_event_slug": pm.get("slug"),
+        "external_market_id": pm.get("condition_id"),
+        "external_market_slug": pm.get("slug"),
+        "home_bid": pm.get("home_bid1"),
+        "home_ask": pm.get("home_ask1"),
+        "away_bid": pm.get("away_bid1"),
+        "away_ask": pm.get("away_ask1"),
+        "draw_bid": pm.get("draw_bid1"),
+        "draw_ask": pm.get("draw_ask1"),
+    }
 
 
 def _finished_for_more_than(pm: dict[str, Any], ts_utc: Any, *, minutes: int) -> bool:

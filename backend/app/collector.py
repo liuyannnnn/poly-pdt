@@ -848,6 +848,10 @@ def _team_variants(value: str) -> set[str]:
         variants.update({"internazionale", "internazionale milano"})
     if "parma" in tokens:
         variants.add("parma")
+    if {"paris", "saint", "germain"} <= tokens or "psg" in tokens:
+        variants.update({"psg", "paris saint germain"})
+    if normalized in {"psg", "paris saint germain"}:
+        variants.update({"psg", "paris saint germain"})
     return {variant for variant in variants if variant}
 
 

@@ -207,6 +207,32 @@ async def test_listener_ignores_pm_market_tick_after_match_has_been_finished_for
 
 
 @pytest.mark.asyncio
+async def test_listener_marks_pm_match_finished_when_external_source_finishes():
+    store, guid = await seed_store()
+    pm = await store.get_json(f"pm:match:{guid}")
+    await store.set_json(f"pm:match:{guid}", {**pm, "status": "live", "match_time": "2H 84"})
+    await store.set_text("idx:asa:id:asa-100", guid)
+    listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
+
+    event = await listener.process_payload(
+        "asa_live",
+        {
+            "match_id": "asa-100",
+            "score": {"home": 1, "away": 0},
+            "status": "finished",
+            "match_time": "Finished",
+            "ts": "2026-05-01T20:55:00Z",
+            "message_id": "asa-finished-1",
+        },
+    )
+
+    pm_match = await store.get_json(f"pm:match:{guid}")
+    assert pm_match["status"] == "finished"
+    assert pm_match["finished_at_utc"] == "2026-05-01T20:55:00Z"
+    assert pm_match["status_source"] == "asa_live"
+
+
+@pytest.mark.asyncio
 async def test_listener_updates_gs_score_without_overwriting_pm_score():
     store, guid = await seed_store()
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))

@@ -255,6 +255,50 @@ async def test_collector_matches_asa_short_names_to_pm_official_team_names():
 
 
 @pytest.mark.asyncio
+async def test_collector_matches_psg_alias_to_paris_saint_germain():
+    store = MemoryStore()
+    pm_payload = [
+        {
+            **PM_EVENTS[0],
+            "id": "ucl-bay-psg-2026-05-06",
+            "slug": "ucl-bay-psg-2026-05-06",
+            "league": "Champions League",
+            "start_time": "2026-05-06T19:00:00Z",
+            "home_team": "Bayern Munich",
+            "away_team": "Paris Saint Germain Fc",
+            "volume": {"moneyline": 1_000_000, "total": 1_000_000},
+        }
+    ]
+    asa_payload = [
+        {
+            "source": "asa",
+            "match_id": "asa-psg",
+            "pregame_id": "asa-psg",
+            "inplay_id": "asa-psg",
+            "league": "UEFA Champions League",
+            "home_team": "Bayern Munich",
+            "away_team": "PSG",
+            "start_time_utc": "2026-05-06T19:00:00Z",
+            "status": "scheduled",
+            "score": {"home": 0, "away": 0},
+        }
+    ]
+    collector = Collector(
+        store=store,
+        pm_client=StaticPMHttpClient(pm_payload),
+        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+    )
+    collector.set_external_source("asa")
+
+    report = await collector.collect_once()
+
+    assert report["matched"] == 1
+    binding = await store.get_json(f"binding:{report['bindings'][0]['guid']}")
+    assert binding["asa_match_id"] == "asa-psg"
+    assert binding["confidence"] == 1.0
+
+
+@pytest.mark.asyncio
 async def test_collector_retries_cached_unbound_pm_matches_when_pm_no_longer_returns_them():
     store = MemoryStore()
     pm_payload = [

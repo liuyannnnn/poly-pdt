@@ -718,6 +718,11 @@ def test_accounts_endpoint_reports_current_calendar_day_realized_profit():
             {"trading_id": "S021", "side": "sell", "profit": 6.0, "ts_utc": yesterday_ts},
             max_len=None,
         )
+        await store.add_stream(
+            "stream:trader:S021:trades",
+            {"trading_id": "S021", "side": "sell", "profit": -2.0, "ts_utc": today_ts},
+            max_len=None,
+        )
 
     asyncio.run(seed())
     isolated_app = create_app(store=store)
@@ -728,7 +733,8 @@ def test_accounts_endpoint_reports_current_calendar_day_realized_profit():
     assert response.status_code == 200
     row = response.json()[0]
     assert row["id"] == "S021"
-    assert row["today_profit"] == 12.34
+    assert row["today_profit"] == 10.34
+    assert row["win_rate"] == 0.6667
 
 
 def test_real_trading_requires_configured_pm_account_alias():

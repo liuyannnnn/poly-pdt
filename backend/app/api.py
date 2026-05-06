@@ -817,7 +817,7 @@ async def _accounts_from_store(
             "available_cash": available_cash,
             "today_profit": _today_realized_profit(trades, timezone_name),
             "position_count": len(positions) if isinstance(positions, list) else account["position_count"],
-            "win_rate": 0,
+            "win_rate": _sell_win_rate(trades),
             "is_running": state.get("status") == "running",
             "account_alias": account.get("account_alias"),
         }
@@ -850,7 +850,7 @@ def _accounts_from_trader(
             "available_cash": account.available_cash,
             "today_profit": _today_realized_profit(trader.get_trades(snapshot.trading_id), timezone_name),
             "position_count": account.position_count,
-            "win_rate": 0,
+            "win_rate": _sell_win_rate(trader.get_trades(snapshot.trading_id)),
             "is_running": snapshot.status == "running",
             "account_alias": account.account_alias,
         }
@@ -902,6 +902,18 @@ def _today_realized_profit(trades: list[dict[str, Any]], timezone_name: str, now
             continue
         total += _float_or_zero(trade.get("profit"))
     return round(total, 2)
+
+
+def _sell_win_rate(trades: list[dict[str, Any]]) -> float:
+    sells = [
+        trade
+        for trade in trades
+        if str(trade.get("side") or trade.get("action") or "").lower() == "sell"
+    ]
+    if not sells:
+        return 0.0
+    wins = sum(1 for trade in sells if _float_or_zero(trade.get("profit")) > 0)
+    return round(wins / len(sells), 4)
 
 
 async def _enrich_trading_rows(store: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
