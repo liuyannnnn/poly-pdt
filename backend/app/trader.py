@@ -94,8 +94,6 @@ class TraderManager:
         self.simulation_running = False
         self._process_interval_seconds = process_interval_seconds
         self._running = False
-        self._task: asyncio.Task[None] | None = None
-        self._wake_event = asyncio.Event()
         self._trader_tasks: dict[str, asyncio.Task[None]] = {}
         self._trader_wake_events: dict[str, asyncio.Event] = {}
         self._market_tick_tasks: set[asyncio.Task[None]] = set()
@@ -113,13 +111,6 @@ class TraderManager:
 
     async def stop(self) -> None:
         self._running = False
-        self._wake_event.set()
-        task = self._task
-        self._task = None
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
         for task in list(self._trader_tasks.values()):
             task.cancel()
         for task in list(self._trader_tasks.values()):
@@ -278,17 +269,13 @@ class TraderManager:
         高频盘口 tick 走 on_market_tick，不会进入这个策略队列。
         """
 
-        queued = False
         for instance in self._tradings.values():
             if instance.snapshot.status == "running":
                 instance.queue.put_nowait(event)
                 self._wake_trader(instance.snapshot.trading_id)
-                queued = True
-        if queued:
-            self._wake_event.set()
 
     def enqueue_event(self, event: dict[str, Any]) -> None:
-        # 兼容 Collector 和旧测试入口；语义等同于比赛信号入队，不做 guid 去重。
+        # 手动注入比赛信号的测试/soak 入口；盘口 tick 不走这里。
         self.on_match_signal(event)
 
     async def on_market_tick(self, event: dict[str, Any]) -> None:
@@ -380,14 +367,6 @@ class TraderManager:
                 )
                 await self._persist_instance(instance)
         return {"processed": processed, "trades": trades, "failures": failures}
-
-    async def _run_loop(self) -> None:
-        while self._running:
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake_event.wait(), timeout=self._process_interval_seconds)
-            self._wake_event.clear()
-            with suppress(Exception):
-                await self.process_queued_events()
 
     def _ensure_trader_task(self, trading_id: str) -> None:
         if not self._running:

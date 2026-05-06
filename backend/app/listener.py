@@ -19,6 +19,7 @@ GS_SOURCE_NAMES = {"gs_live"}
 ASA_SOURCE_NAMES = {"asa_live"}
 CONNECTION_STATUS_FIELD = "__connection_status__"
 CONNECTION_STATUS_CONNECTED = "connected"
+CONNECTION_STATUS_DISCONNECTED = "disconnected"
 
 
 class ListenerSource(Protocol):
@@ -527,6 +528,10 @@ class Listener:
                         state["connected"] = True
                         state["last_connected_at"] = _utc_now()
                         state["last_error"] = None
+                        continue
+                    if payload.get(CONNECTION_STATUS_FIELD) == CONNECTION_STATUS_DISCONNECTED:
+                        state["connected"] = False
+                        state["last_event_at"] = _utc_now()
                         continue
                     if not state["connected"]:
                         state["connected"] = True

@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 
@@ -5,6 +7,7 @@ from app.collector import Collector, StaticGSHttpClient
 from app.listener import BroadcastHub, Listener
 from app.polymarket import (
     PMGammaHttpClient,
+    PMUserWsSource,
     normalize_pm_market_ws_payloads,
     normalize_pm_sports_ws_payload,
     normalize_pm_user_ws_payload,
@@ -304,6 +307,29 @@ def test_pm_user_ws_payload_normalizes_orders_and_fills_without_credentials():
     assert order["orders"][0]["id"] == "order-1"
     assert fill["fills"][0]["id"] == "fill-1"
     assert "auth" not in order
+
+
+@pytest.mark.asyncio
+async def test_pm_user_ws_source_reports_disconnected_only_after_all_accounts_drop():
+    class Account:
+        def __init__(self, alias):
+            self.alias = alias
+            self.has_api_credentials = True
+
+    queue = asyncio.Queue()
+    source = PMUserWsSource(store=MemoryStore(), accounts=[Account("pm-a"), Account("pm-b")])
+    account_a, account_b = source._accounts
+
+    await source._mark_account_connected(account_a, queue)
+    await source._mark_account_connected(account_b, queue)
+    await source._mark_account_disconnected(account_a, queue, RuntimeError("drop"))
+    await source._mark_account_disconnected(account_b, queue, RuntimeError("drop"))
+
+    rows = [await queue.get(), await queue.get(), await queue.get()]
+    assert rows[0]["__connection_status__"] == "connected"
+    assert rows[1]["__connection_status__"] == "connected"
+    assert rows[2]["__connection_status__"] == "disconnected"
+    assert rows[2]["account_alias"] == "pm-b"
 
 
 def test_pm_sports_ws_payload_uses_period_and_elapsed_as_match_time():

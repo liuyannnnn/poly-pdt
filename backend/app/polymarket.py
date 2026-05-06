@@ -192,16 +192,26 @@ class PMUserWsSource:
 
     name = "pm_user"
 
-    def __init__(self, *, store: Any, accounts: list[Any], endpoint: str = PM_USER_WS_URL):
+    def __init__(
+        self,
+        *,
+        store: Any,
+        accounts: list[Any],
+        endpoint: str = PM_USER_WS_URL,
+        reconnect_delay_seconds: float = 1.0,
+    ):
         self._store = store
         self._accounts = [account for account in accounts if getattr(account, "has_api_credentials", False)]
         self._endpoint = endpoint
+        self._reconnect_delay_seconds = reconnect_delay_seconds
+        self._connected_aliases: set[str] = set()
 
     async def listen(self) -> AsyncIterator[dict[str, Any]]:
         if not self._accounts:
             return
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
-        tasks = [asyncio.create_task(self._listen_account(account, queue)) for account in self._accounts]
+        self._connected_aliases.clear()
+        tasks = [asyncio.create_task(self._listen_account_forever(account, queue)) for account in self._accounts]
         try:
             while True:
                 yield await queue.get()
@@ -212,10 +222,22 @@ class PMUserWsSource:
                 with suppress(asyncio.CancelledError):
                     await task
 
-    async def _listen_account(self, account: Any, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    async def _listen_account_forever(self, account: Any, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        while True:
+            try:
+                await self._listen_account_once(account, queue)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._mark_account_disconnected(account, queue, exc)
+            else:
+                await self._mark_account_disconnected(account, queue, None)
+            await asyncio.sleep(self._reconnect_delay_seconds)
+
+    async def _listen_account_once(self, account: Any, queue: asyncio.Queue[dict[str, Any]]) -> None:
         async with legacy_ws_connect(self._endpoint, ping_interval=None, ping_timeout=None, max_queue=2048) as websocket:
             await self._subscribe_current_markets(websocket, account, initial=True)
-            await queue.put({"__connection_status__": "connected"})
+            await self._mark_account_connected(account, queue)
             heartbeat_task = asyncio.create_task(self._send_heartbeat(websocket))
             subscribe_task = asyncio.create_task(self._refresh_subscriptions(websocket, account))
             try:
@@ -241,6 +263,24 @@ class PMUserWsSource:
                     await heartbeat_task
                 with suppress(asyncio.CancelledError):
                     await subscribe_task
+
+    async def _mark_account_connected(self, account: Any, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self._connected_aliases.add(str(account.alias))
+        await queue.put({"__connection_status__": "connected", "account_alias": account.alias})
+
+    async def _mark_account_disconnected(
+        self,
+        account: Any,
+        queue: asyncio.Queue[dict[str, Any]],
+        exc: Exception | None,
+    ) -> None:
+        self._connected_aliases.discard(str(account.alias))
+        if self._connected_aliases:
+            return
+        row = {"__connection_status__": "disconnected", "account_alias": account.alias}
+        if exc is not None:
+            row["error"] = exc.__class__.__name__
+        await queue.put(row)
 
     async def _subscribe_current_markets(self, websocket: Any, account: Any, *, initial: bool = False) -> None:
         market_ids = [

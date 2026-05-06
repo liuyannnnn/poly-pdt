@@ -795,6 +795,35 @@ async def test_listener_does_not_report_connected_before_source_confirms_transpo
     assert status["polymarket_ws_connected"] is False
 
 
+@pytest.mark.asyncio
+async def test_listener_marks_source_disconnected_when_transport_reports_disconnect():
+    store, _guid = await seed_store()
+    source = StatusSource(
+        "pm_user",
+        [
+            {"__connection_status__": "connected"},
+            {"__connection_status__": "disconnected"},
+        ],
+    )
+    listener = Listener(
+        store=store,
+        broadcaster=BroadcastHub(),
+        trader_manager=TraderManager(store=store),
+        sources=[source],
+        reconnect_delay_seconds=0.01,
+    )
+
+    await listener.start()
+    try:
+        await _wait_until(lambda: source.delivered >= 2)
+        status = listener.status()
+    finally:
+        await listener.stop()
+
+    assert status["pm_user_ws_connected"] is False
+    assert status["polymarket_ws_connected"] is False
+
+
 class FlakySource:
     name = "pm_sports"
 
@@ -824,6 +853,20 @@ class SlowConnectSource:
         await asyncio.sleep(1)
         if False:
             yield {}
+
+
+class StatusSource:
+    def __init__(self, name, payloads):
+        self.name = name
+        self.payloads = payloads
+        self.delivered = 0
+
+    async def listen(self):
+        for payload in self.payloads:
+            self.delivered += 1
+            yield payload
+        while True:
+            await asyncio.sleep(1)
 
 
 async def _wait_until(predicate, timeout_seconds: float = 0.5) -> None:
