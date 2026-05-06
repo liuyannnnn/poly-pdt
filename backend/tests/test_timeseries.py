@@ -5,6 +5,7 @@ from app.listener import BroadcastHub
 from app.store import MemoryStore
 from app.timeseries import (
     COLLECTOR_SERIES_TTL_SECONDS,
+    MATCH_RELATED_TTL_SECONDS,
     TEN_SECOND_SERIES_TTL_SECONDS,
     TICK_SERIES_TTL_SECONDS,
     append_pm_collector_snapshot,
@@ -142,8 +143,8 @@ async def test_tick_resampler_keeps_observed_tick_times_without_filling_gaps():
     assert rows[1]["home_ask"] == 0.58
     assert rows[0]["phase"] == "LIVE"
     assert rows[0]["ingest_type"] == "market_10s"
-    assert await store.ttl("series:pm:ticks:guid-match-1") == 24 * 60 * 60
-    assert TICK_SERIES_TTL_SECONDS == 24 * 60 * 60
+    assert await store.ttl("series:pm:ticks:guid-match-1") == MATCH_RELATED_TTL_SECONDS
+    assert TICK_SERIES_TTL_SECONDS == MATCH_RELATED_TTL_SECONDS
     assert await store.ttl("series:pm:10s:guid-match-1") == TEN_SECOND_SERIES_TTL_SECONDS
 
 

@@ -7,6 +7,7 @@ from app.collector import Collector, StaticGSHttpClient, StaticPMHttpClient
 from app.discriminator import MatchDiscriminator
 from app.listener import BroadcastHub, Listener
 from app.store import MemoryStore
+from app.timeseries import MATCH_RELATED_TTL_SECONDS
 from app.trader import TraderManager
 
 from .fixtures import GS_D1, GS_HOME, PM_EVENTS
@@ -142,7 +143,7 @@ async def test_listener_updates_pm_market_without_overwriting_gs_state_and_broad
     assert ticks[-1]["home_ask"] == 0.53
     assert ticks[-1]["draw_ask"] == 0.27
     assert ticks[-1]["away_ask"] == 0.33
-    assert await store.ttl(f"series:pm:ticks:{guid}") == 24 * 60 * 60
+    assert await store.ttl(f"series:pm:ticks:{guid}") == MATCH_RELATED_TTL_SECONDS
     assert broadcasts[-1]["topic"] == "market.tick"
     assert broadcasts[-1]["payload"]["match_id"] == guid
     assert broadcasts[-1]["payload"]["outcome"] == "home"

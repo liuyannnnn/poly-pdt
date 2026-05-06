@@ -12,7 +12,7 @@ TEN_SECONDS = 10
 MATCH_RELATED_TTL_SECONDS = 3 * 24 * 60 * 60
 COLLECTOR_SERIES_TTL_SECONDS = MATCH_RELATED_TTL_SECONDS
 TEN_SECOND_SERIES_TTL_SECONDS = MATCH_RELATED_TTL_SECONDS
-TICK_SERIES_TTL_SECONDS = 24 * 60 * 60
+TICK_SERIES_TTL_SECONDS = MATCH_RELATED_TTL_SECONDS
 CURRENT_STATE_TTL_SECONDS = COLLECTOR_SERIES_TTL_SECONDS
 MAX_COLLECTOR_ROWS = 20_000
 MAX_TEN_SECOND_ROWS = 5 * 24 * 60 * 6
@@ -54,8 +54,8 @@ async def append_pm_tick_snapshot(
 ) -> dict[str, Any]:
     """把 PM market WS tick 保存为原始 tick 序列。
 
-    tick 序列只保留较短 TTL；界面图表使用 10 秒重采样序列，避免原始 tick
-    过多时拖慢前端。
+    tick 序列保留 72 小时用于赛后复盘；界面图表使用 10 秒重采样序列，
+    避免原始 tick 过多时拖慢前端。
     """
 
     snapshot_ts = normalize_ts(ts_utc)
