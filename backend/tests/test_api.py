@@ -118,14 +118,62 @@ def test_match_snapshots_endpoint_returns_all_and_live_series_rows():
     isolated_app = create_app(store=store, collector=Collector(store=store, pm_client=StaticPMHttpClient([])))
 
     with TestClient(isolated_app) as client:
-        both = client.get("/api/v1/matches/guid-match-1/snapshots")
+        all_rows = client.get("/api/v1/matches/guid-match-1/snapshots")
+        both = client.get("/api/v1/matches/guid-match-1/snapshots?series=both")
         live = client.get("/api/v1/matches/guid-match-1/snapshots?series=live")
 
+    assert all_rows.status_code == 200
+    assert [row["phase"] for row in all_rows.json()] == ["ALL"]
     assert both.status_code == 200
     assert [row["phase"] for row in both.json()] == ["ALL", "LIVE"]
     assert both.json()[0]["team_home"] == "Brentford FC"
     assert both.json()[0]["game_id"] == 90091343
     assert live.json()[0]["phase"] == "LIVE"
+
+
+def test_matches_endpoint_hides_secondary_exact_score_market_rows():
+    store = MemoryStore()
+
+    async def seed() -> None:
+        await store.set_json(
+            "pm:match:guid-main",
+            {
+                "guid": "guid-main",
+                "sport": "football",
+                "league": "UCL",
+                "home_team": "FC Bayern München",
+                "away_team": "Paris Saint-Germain FC",
+                "start_time_utc": "2026-05-06T19:00:00Z",
+                "status": "scheduled",
+                "slug": "ucl-bay-psg-2026-05-06",
+                "condition_id": "cond-main",
+                "total_volume": 1_000_000,
+            },
+        )
+        await store.set_json(
+            "pm:match:guid-exact",
+            {
+                "guid": "guid-exact",
+                "sport": "football",
+                "league": "UCL",
+                "home_team": "FC Bayern München",
+                "away_team": "Paris Saint-Germain FC",
+                "start_time_utc": "2026-05-06T19:00:00Z",
+                "status": "scheduled",
+                "slug": "ucl-bay-psg-2026-05-06-exact-score",
+                "condition_id": "cond-exact",
+                "total_volume": 1_000_000,
+            },
+        )
+
+    asyncio.run(seed())
+    isolated_app = create_app(store=store, collector=Collector(store=store, pm_client=StaticPMHttpClient([])))
+
+    with TestClient(isolated_app) as client:
+        response = client.get("/api/v1/matches")
+
+    assert response.status_code == 200
+    assert [row["match_id"] for row in response.json()] == ["guid-main"]
 
 
 def test_trades_and_logs_endpoints_ignore_legacy_json_lists():
@@ -182,7 +230,7 @@ def test_matches_endpoint_uses_external_update_time_when_it_is_newer_than_pm():
             "binding:guid-match-1",
             {
                 "guid": "guid-match-1",
-                "external_source": "asa",
+                "external_source": "ggs",
                 "external_match_id": "1626475",
                 "status": "matched",
             },
@@ -190,7 +238,7 @@ def test_matches_endpoint_uses_external_update_time_when_it_is_newer_than_pm():
         await store.set_json(
             "external:match:guid-match-1",
             {
-                "source": "asa",
+                "source": "ggs",
                 "updated_at_utc": "2026-05-03T15:54:41.432764Z",
                 "shots_on_target": {"home": 3, "away": 4},
             },
@@ -334,7 +382,7 @@ def test_logs_endpoint_returns_stored_match_process_stream_rows_without_filterin
                 "ts_utc": "2026-05-02T14:31:12Z",
                 "guid": "guid-match-1",
                 "source": "discriminator",
-                "data_source": "asa_live",
+                "data_source": "ggs_live",
                 "event_kind": "shots_on_target_changed",
                 "message": "射正 3-1",
             },
@@ -360,7 +408,7 @@ def test_logs_endpoint_returns_stored_match_process_stream_rows_without_filterin
             "ts_utc": "2026-05-02T14:31:12Z",
             "guid": "guid-match-1",
             "source": "discriminator",
-            "data_source": "asa_live",
+            "data_source": "ggs_live",
             "event_kind": "shots_on_target_changed",
             "message": "射正 3-1",
         },
@@ -372,11 +420,11 @@ def test_external_source_match_includes_provider_widget_url():
 
     async def seed() -> None:
         await store.set_json(
-            "asa:match:guid-match-1",
+            "ggs:match:guid-match-1",
             {
-                "source": "asa",
+                "source": "ggs",
                 "guid": "guid-match-1",
-                "match_id": "asa-100",
+                "match_id": "ggs-100",
                 "home_team": "Arsenal",
                 "away_team": "Chelsea",
             },
@@ -389,8 +437,8 @@ def test_external_source_match_includes_provider_widget_url():
         response = client.get("/api/v1/external-source/match/guid-match-1")
 
     assert response.status_code == 200
-    assert response.json()["widget_source"] == "asa"
-    assert response.json()["widget_url"].startswith("https://allsportsapi.com/widgets/")
+    assert response.json()["widget_source"] == "ggs"
+    assert response.json()["widget_url"] == "https://doc.ggscore.co/"
 
 
 def test_collector_settings_can_be_read_and_updated_without_trd():
@@ -412,10 +460,38 @@ def test_collector_settings_can_be_read_and_updated_without_trd():
         update_response = client.put("/api/v1/settings/collector", json=payload)
 
     assert default_response.status_code == 200
-    assert default_response.json()["external_source"] == "asa"
+    assert default_response.json()["external_source"] == "ggs"
     assert "basketball_volume_threshold_k" not in default_response.json()
     assert update_response.status_code == 200
     assert update_response.json() == payload
+
+
+def test_collector_settings_falls_back_from_removed_external_source():
+    store = MemoryStore()
+
+    async def seed() -> None:
+        await store.set_json(
+            "settings:collector",
+            {
+                "collection_interval_minutes": 2,
+                "football_volume_threshold_k": 100,
+                "external_source": "asa",
+            },
+        )
+
+    asyncio.run(seed())
+    collector = Collector(store=store, pm_client=StaticPMHttpClient([]))
+    isolated_app = create_app(store=store, collector=collector)
+
+    with TestClient(isolated_app) as client:
+        response = client.get("/api/v1/settings/collector")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "collection_interval_minutes": 2,
+        "football_volume_threshold_k": 100,
+        "external_source": "ggs",
+    }
 
 
 def test_collector_settings_save_triggers_immediate_collection():

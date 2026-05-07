@@ -82,3 +82,43 @@ pdt2.1/frontend-snapshot/ -> front/
 ```
 
 前端页面结构和交互先不改。后端字段变化只允许通过 API client / mapper 适配。
+
+## 本机/服务器试运行
+
+默认端口：
+
+- 后端 FastAPI：`8000`
+- 前端 Vite：`8088`
+- Redis：本机 `6379`
+
+本机启动：
+
+```bash
+./start.sh
+```
+
+服务器试运行时，如果需要从其他机器访问页面：
+
+```bash
+HOST=0.0.0.0 ./start.sh
+```
+
+前端默认请求同源 `/api/v1`，Vite 会把 `/api` 代理到后端 `http://127.0.0.1:8000`，因此浏览器访问 `http://服务器IP:8088/` 时不会再请求访问者自己电脑的 `127.0.0.1`。如果后端不在同一台机器，可设置：
+
+```bash
+BACKEND_ORIGIN=http://后端IP:8000 ./start.sh
+```
+
+如不走前端代理，而是让浏览器直接访问后端，需要同时设置前端构建环境变量和后端 CORS：
+
+```bash
+VITE_API_BASE_URL=http://后端IP:8000/api/v1
+VITE_MARKET_WS_URL=ws://后端IP:8000/api/v1/ws/market
+PDT_CORS_ORIGINS=http://前端IP:8088
+```
+
+上线前确认：
+
+- `.env` / `.env.local` 只留在服务器本地，不提交 git。
+- PM 真实交易仍默认 dry-run，真实下单需要单独显式授权和配置。
+- GGS HTTP 可用于采集；GGS-WS 如果显示断开，需要在 GGS 后台确认 WS 权限、域名和服务器出口 IP 白名单。

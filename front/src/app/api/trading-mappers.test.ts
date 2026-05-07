@@ -671,7 +671,7 @@ describe("applyMatchLogToMatches", () => {
       payload: {
         guid: "guid-397942",
         ts_utc: "2026-05-03T15:54:41.432764Z",
-        data_source: "asa_live",
+        data_source: "ggs_live",
         event_kind: "shots_on_target_changed",
       },
     });

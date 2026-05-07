@@ -7,7 +7,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from .allsportsapi import ALLSPORTS_HTTP_URL, ALLSPORTS_WS_URL
+from .ggscore import GGS_FOOTBALL_RESULT_URL, GGS_FOOTBALL_SPORT_ID, GGS_WS_URL
 from .goalserve import resolve_goalserve_api_key
 from .polymarket import PM_GAMMA_EVENTS_URL, PM_MARKET_WS_URL, PM_SPORTS_WS_URL, PM_USER_WS_URL
 
@@ -43,12 +43,15 @@ class Settings:
     goalserve_ws_token_url: str = "http://live.goalserve.com/api/v1/auth/gettoken"
     goalserve_ws_sport: str = "soccer"
     goalserve_widget_url_template: str | None = None
-    allsports_api_key: str | None = None
-    allsports_http_url: str = ALLSPORTS_HTTP_URL
-    allsports_http_enabled: bool = False
-    allsports_ws_url: str = ALLSPORTS_WS_URL
-    allsports_ws_enabled: bool = False
-    allsports_widget_url_template: str | None = None
+    ggs_app_id: str | None = None
+    ggs_app_secret: str | None = None
+    ggs_http_url: str = GGS_FOOTBALL_RESULT_URL
+    ggs_http_enabled: bool = False
+    ggs_http_poll_enabled: bool = False
+    ggs_http_poll_interval_seconds: float = 2.0
+    ggs_ws_url: str = GGS_WS_URL
+    ggs_ws_enabled: bool = False
+    ggs_sport_id: str = GGS_FOOTBALL_SPORT_ID
     auth_enabled: bool = False
     auth_rotation_days: int = 3
     auth_session_ttl_seconds: int | None = None
@@ -65,14 +68,15 @@ class Settings:
     smtp_password: str | None = None
     smtp_from: str | None = None
     cors_origins: tuple[str, ...] = (
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
+        "http://127.0.0.1:8088",
+        "http://localhost:8088",
     )
 
 
 def load_settings() -> Settings:
     if "pytest" not in sys.modules:
         load_dotenv(PROJECT_ROOT / ".env", override=False)
+        load_dotenv(PROJECT_ROOT / ".env.local", override=False)
     # Goalserve key 可从 env 或本地 feeds 文档解析，但不会写入 Redis 或 API 响应。
     origins = os.getenv("PDT_CORS_ORIGINS")
     parsed_origins = (
@@ -121,23 +125,18 @@ def load_settings() -> Settings:
             os.getenv("GOALSERVE_WIDGET_URL_TEMPLATE", Settings.goalserve_widget_url_template or "")
             or None
         ),
-        allsports_api_key=(
-            os.getenv("ALLSPORTS_API_KEY")
-            or os.getenv("ASA_API_KEY")
-            or Settings.allsports_api_key
-        ),
-        allsports_http_url=os.getenv("ALLSPORTS_HTTP_URL", Settings.allsports_http_url),
-        allsports_http_enabled=os.getenv("ALLSPORTS_HTTP_ENABLED", "0").lower()
+        ggs_app_id=os.getenv("GGS_APP_ID", Settings.ggs_app_id or "") or None,
+        ggs_app_secret=os.getenv("GGS_APP_SECRET", Settings.ggs_app_secret or "") or None,
+        ggs_http_url=os.getenv("GGS_HTTP_URL", Settings.ggs_http_url),
+        ggs_http_enabled=os.getenv("GGS_HTTP_ENABLED", "1").lower() in {"1", "true", "yes"},
+        ggs_http_poll_enabled=os.getenv("GGS_HTTP_POLL_ENABLED", default_ws_enabled).lower()
         in {"1", "true", "yes"},
-        allsports_ws_url=os.getenv("ALLSPORTS_WS_URL", Settings.allsports_ws_url),
-        allsports_ws_enabled=os.getenv("ALLSPORTS_WS_ENABLED", "0").lower()
-        in {"1", "true", "yes"},
-        allsports_widget_url_template=(
-            os.getenv("ALLSPORTS_WIDGET_URL_TEMPLATE")
-            or os.getenv("ASA_WIDGET_URL_TEMPLATE")
-            or Settings.allsports_widget_url_template
-            or None
+        ggs_http_poll_interval_seconds=float(
+            os.getenv("GGS_HTTP_POLL_INTERVAL_SECONDS", Settings.ggs_http_poll_interval_seconds)
         ),
+        ggs_ws_url=os.getenv("GGS_WS_URL", Settings.ggs_ws_url),
+        ggs_ws_enabled=os.getenv("GGS_WS_ENABLED", default_ws_enabled).lower() in {"1", "true", "yes"},
+        ggs_sport_id=os.getenv("GGS_SPORT_ID", Settings.ggs_sport_id),
         auth_enabled=os.getenv("AUTH_ENABLED", "0").lower() in {"1", "true", "yes"},
         auth_rotation_days=int(os.getenv("AUTH_ROTATION_DAYS", Settings.auth_rotation_days)),
         auth_session_ttl_seconds=(

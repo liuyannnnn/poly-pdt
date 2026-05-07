@@ -53,7 +53,7 @@ const formatLogActor = (log: any): string => {
   }
   if (source === "discriminator") {
     if (raw.includes("goalserve") || raw === "gs") return "GS";
-    if (raw.includes("allsports") || raw.includes("asa")) return "ASA";
+    if (raw.includes("ggs") || raw.includes("ggscore")) return "GGS";
     if (raw.includes("pm") || raw.includes("poly")) return "PM";
     return raw ? raw.toUpperCase() : "SYS";
   }
@@ -61,7 +61,7 @@ const formatLogActor = (log: any): string => {
     return "SYS";
   }
   if (raw.includes("goalserve") || raw === "gs") return "GS";
-  if (raw.includes("allsports") || raw.includes("asa")) return "ASA";
+  if (raw.includes("ggs") || raw.includes("ggscore")) return "GGS";
   if (raw.includes("pm") || raw.includes("poly")) return "PM";
   return raw ? raw.toUpperCase() : "SYS";
 };
@@ -98,16 +98,16 @@ const renderLogContent = (content: string) => {
   return <span>{content}</span>;
 };
 
-const normalizeExternalSourceKey = (source: unknown): "asa" | "gs" | "" => {
+const normalizeExternalSourceKey = (source: unknown): "ggs" | "gs" | "" => {
   const raw = String(source || "").trim().toLowerCase();
-  if (raw.includes("allsports") || raw.includes("asa")) return "asa";
+  if (raw.includes("ggs") || raw.includes("ggscore")) return "ggs";
   if (raw.includes("goalserve") || raw === "gs") return "gs";
   return "";
 };
 
-const fallbackWidgetUrlForSource = (source: "asa" | "gs" | ""): string => {
-  if (source === "asa") {
-    return "https://allsportsapi.com/widgets/football-soccer/livescore/download";
+const fallbackWidgetUrlForSource = (source: "ggs" | "gs" | ""): string => {
+  if (source === "ggs") {
+    return "https://doc.ggscore.co/";
   }
   if (source === "gs") {
     return "https://www.goalserve.com/en/sport-data-widgets/match-details-widget/details";
@@ -115,7 +115,7 @@ const fallbackWidgetUrlForSource = (source: "asa" | "gs" | ""): string => {
   return "";
 };
 
-const safeWidgetUrl = (value: unknown, source: "asa" | "gs" | ""): string => {
+const safeWidgetUrl = (value: unknown, source: "ggs" | "gs" | ""): string => {
   const raw = String(value || "").trim();
   if (/^https?:\/\//i.test(raw)) {
     return raw;
@@ -154,6 +154,7 @@ export const MatchDetail = () => {
   const [externalDetail, setExternalDetail] = useState<any>(null);
   const [chartPhase, setChartPhase] = useState<ChartPhase>("ALL");
   const [showWidgetDialog, setShowWidgetDialog] = useState(false);
+  const [showLiveChartDialog, setShowLiveChartDialog] = useState(false);
 
   // Search live/scheduled + history matches
   const match = useMemo(
@@ -176,8 +177,9 @@ export const MatchDetail = () => {
     let disposed = false;
     const load = async () => {
       try {
-        const [snapshots, trades, logs, externalSource] = await Promise.all([
-          fetchMatchSnapshots(selectedMatchId, 1000),
+        const [allSnapshots, liveSnapshots, trades, logs, externalSource] = await Promise.all([
+          fetchMatchSnapshots(selectedMatchId, "all"),
+          fetchMatchSnapshots(selectedMatchId, "live"),
           fetchTrades({ matchId: selectedMatchId, limit: 200 }),
           fetchLogs({ matchId: selectedMatchId, limit: 200 }),
           fetchExternalSourceMatchDetail(selectedMatchId),
@@ -185,7 +187,7 @@ export const MatchDetail = () => {
         if (disposed) {
           return;
         }
-        setBackendSnapshots(snapshots);
+        setBackendSnapshots([...allSnapshots, ...liveSnapshots]);
         setBackendTrades(trades);
         setBackendLogs(logs);
         setExternalDetail(externalSource);
@@ -415,8 +417,8 @@ export const MatchDetail = () => {
   ].filter(Boolean).join(" / ");
   const externalSourceKey = normalizeExternalSourceKey(externalDetail?.source || match.externalSource);
   const externalSourceLabel =
-    externalSourceKey === "asa"
-      ? "AllSportsAPI"
+    externalSourceKey === "ggs"
+      ? "GGS"
       : externalSourceKey === "gs"
         ? "Goalserve"
         : "未绑定";
@@ -504,7 +506,7 @@ export const MatchDetail = () => {
 
       {/* ── ECharts Chart ──────────────────────────────────────────────── */}
       <div className="p-4 bg-white border-b border-gray-200 mt-2">
-        <div className="flex justify-end mb-3">
+        <div className="flex justify-end gap-2 mb-3">
           <div className="inline-flex rounded-md border border-gray-200 overflow-hidden">
             <button
               type="button"
@@ -539,6 +541,17 @@ export const MatchDetail = () => {
               LIVE
             </button>
           </div>
+          {chartPhase === "LIVE" && filteredSnapshots.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowLiveChartDialog(true)}
+              className="inline-flex h-[34px] w-[34px] items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-900"
+              title="放大 LIVE 图表"
+              aria-label="放大 LIVE 图表"
+            >
+              <Maximize2 size={15} />
+            </button>
+          )}
         </div>
         {filteredSnapshots.length > 0 ? (
           <div className="rounded-xl overflow-hidden bg-transparent">
@@ -722,6 +735,42 @@ export const MatchDetail = () => {
               <div className="space-y-1 font-mono text-sm">
                 {tradeLogs.map((log) => <LogRow key={log.id} log={log} />)}
               </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={showLiveChartDialog} onOpenChange={setShowLiveChartDialog}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 bg-gray-950/80 z-50 backdrop-blur-sm" />
+          <Dialog.Content className="fixed inset-4 bg-white border border-gray-200 rounded-lg shadow-2xl z-50 flex flex-col overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-200 flex justify-between items-center">
+              <div>
+                <Dialog.Title className="text-base font-semibold text-gray-900">
+                  LIVE 图表
+                </Dialog.Title>
+                <Dialog.Description className="text-xs text-gray-400 mt-0.5">
+                  {match.slug}
+                </Dialog.Description>
+              </div>
+              <Dialog.Close className="text-gray-400 hover:text-gray-700 cursor-pointer transition-colors">
+                <X size={20} />
+              </Dialog.Close>
+            </div>
+            <div className="flex-1 p-4">
+              {chartPhase === "LIVE" && filteredSnapshots.length > 0 ? (
+                <ReactECharts
+                  key={`${match.id}-live-fullscreen`}
+                  option={chartOption}
+                  style={{ height: "100%", width: "100%" }}
+                  notMerge={true}
+                  lazyUpdate={true}
+                />
+              ) : (
+                <div className="h-full flex items-center justify-center text-sm text-gray-400">
+                  暂无LIVE图表数据
+                </div>
+              )}
             </div>
           </Dialog.Content>
         </Dialog.Portal>

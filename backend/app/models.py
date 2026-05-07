@@ -5,15 +5,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-ExternalSource = Literal["gs", "asa", "none"]
+ExternalSource = Literal["gs", "ggs", "none"]
 TradingMode = Literal["simulation", "real"]
-ManualExternalSource = Literal["gs", "asa"]
+ManualExternalSource = Literal["gs", "ggs"]
 
 
 class CollectorSettings(BaseModel):
     collection_interval_minutes: int = Field(default=5, ge=1)
     football_volume_threshold_k: int = Field(default=500, ge=0)
-    external_source: ExternalSource = "asa"
+    external_source: ExternalSource = "ggs"
 
 
 class ManualExternalBindPayload(BaseModel):
@@ -50,13 +50,11 @@ class CollectorStatus(BaseModel):
     pm_sports_ws_connected: bool = False
     gs_ws_enabled: bool = False
     gs_ws_connected: bool = False
-    asa_ws_enabled: bool = False
-    asa_ws_connected: bool = False
-    allsports_ws_enabled: bool = False
-    allsports_ws_connected: bool = False
-    allsports_last_connected_at: str | None = None
-    allsports_last_event_at: str | None = None
-    allsports_last_error: str | None = None
+    ggs_ws_enabled: bool = False
+    ggs_ws_connected: bool = False
+    ggs_last_connected_at: str | None = None
+    ggs_last_event_at: str | None = None
+    ggs_last_error: str | None = None
     polymarket_last_connected_at: str | None = None
     polymarket_last_event_at: str | None = None
     polymarket_last_error: str | None = None

@@ -15,11 +15,13 @@ from .fixtures import GS_D1, GS_HOME, PM_EVENTS
 
 async def seed_store() -> tuple[MemoryStore, str]:
     store = MemoryStore()
-    report = await Collector(
+    collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(PM_EVENTS[:1]),
         gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
-    ).collect_once()
+    )
+    collector.set_external_source("gs")
+    report = await collector.collect_once()
     return store, report["bindings"][0]["guid"]
 
 
@@ -103,9 +105,9 @@ async def test_discriminator_enqueues_trader_event_before_slow_stream_logging_fi
 
     task = asyncio.create_task(
         discriminator.process_external_state(
-            source="asa_live",
+            source="ggs_live",
             guid="guid-1",
-            payload={"message_id": "asa-score-1", "pm_score_home_at_event": 0, "pm_score_away_at_event": 0},
+            payload={"message_id": "ggs-score-1", "pm_score_home_at_event": 0, "pm_score_away_at_event": 0},
             previous={"score_home": 0, "score_away": 0},
             current={"score_home": 1, "score_away": 0, "updated_at_utc": "2026-05-05T01:00:00Z"},
             mapping={"score_home": "score_home", "score_away": "score_away"},
@@ -239,25 +241,25 @@ async def test_listener_marks_pm_match_finished_when_external_source_finishes():
     store, guid = await seed_store()
     pm = await store.get_json(f"pm:match:{guid}")
     await store.set_json(f"pm:match:{guid}", {**pm, "status": "live", "match_time": "2H 84"})
-    await store.set_text("idx:asa:id:asa-100", guid)
+    await store.set_text("idx:ggs:id:ggs-100", guid)
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
     event = await listener.process_payload(
-        "asa_live",
+        "ggs_live",
         {
-            "match_id": "asa-100",
+            "match_id": "ggs-100",
             "score": {"home": 1, "away": 0},
             "status": "finished",
             "match_time": "Finished",
             "ts": "2026-05-01T20:55:00Z",
-            "message_id": "asa-finished-1",
+            "message_id": "ggs-finished-1",
         },
     )
 
     pm_match = await store.get_json(f"pm:match:{guid}")
     assert pm_match["status"] == "finished"
     assert pm_match["finished_at_utc"] == "2026-05-01T20:55:00Z"
-    assert pm_match["status_source"] == "asa_live"
+    assert pm_match["status_source"] == "ggs_live"
 
 
 @pytest.mark.asyncio
@@ -290,36 +292,38 @@ async def test_listener_updates_gs_score_without_overwriting_pm_score():
 
 
 @pytest.mark.asyncio
-async def test_listener_updates_asa_score_without_overwriting_pm_score():
+async def test_listener_updates_ggs_score_without_overwriting_pm_score():
     store, guid = await seed_store()
     await store.set_json(
-        f"asa:match:{guid}",
-        {"source": "asa", "match_id": "asa-100", "inplay_id": "asa-100", "score_home": 0, "score_away": 0},
+        f"ggs:match:{guid}",
+        {"source": "ggs", "match_id": "ggs-100", "inplay_id": "ggs-100", "score_home": 0, "score_away": 0},
     )
-    await store.set_text("idx:asa:inplay:asa-100", guid)
+    await store.set_text("idx:ggs:inplay:ggs-100", guid)
+    await store.set_text("idx:ggs:id:ggs-100", guid)
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
     event = await listener.process_payload(
-        "asa_live",
+        "ggs_live",
         {
-            "event_key": "asa-100",
-            "event_status": "35",
-            "event_final_result": "1 - 0",
-            "message_id": "asa-1",
+            "match_id": "ggs-100",
+            "score": {"home": 1, "away": 0},
+            "clock": "35",
+            "ts": "2026-05-03T12:00:01Z",
+            "message_id": "ggs-1",
         },
     )
 
     pm_match = await store.get_json(f"pm:match:{guid}")
-    asa_match = await store.get_json(f"asa:match:{guid}")
+    ggs_match = await store.get_json(f"ggs:match:{guid}")
 
     assert event is not None
-    assert event["source"] == "asa_live"
+    assert event["source"] == "ggs_live"
     assert event["score_home"] == 1
     assert event["pm_score_home_at_event"] == 0
     assert event["pm_score_away_at_event"] == 0
     assert "score_home" in event["changed_fields"]
-    assert asa_match["score_home"] == 1
-    assert asa_match["clock"] == "35"
+    assert ggs_match["score_home"] == 1
+    assert ggs_match["clock"] == "35"
     assert pm_match["score_home"] == 0
 
 
@@ -327,39 +331,40 @@ async def test_listener_updates_asa_score_without_overwriting_pm_score():
 async def test_listener_broadcasts_external_match_even_when_values_are_unchanged():
     store, guid = await seed_store()
     await store.set_json(
-        f"asa:match:{guid}",
+        f"ggs:match:{guid}",
         {
-            "source": "asa",
+            "source": "ggs",
             "guid": guid,
-            "match_id": "asa-100",
-            "inplay_id": "asa-100",
+            "match_id": "ggs-100",
+            "inplay_id": "ggs-100",
             "score_home": 1,
             "score_away": 0,
             "clock": "35",
             "updated_at_utc": "2026-05-03T12:00:00Z",
         },
     )
-    await store.set_text("idx:asa:inplay:asa-100", guid)
+    await store.set_text("idx:ggs:inplay:ggs-100", guid)
+    await store.set_text("idx:ggs:id:ggs-100", guid)
     hub = BroadcastHub()
     listener = Listener(store=store, broadcaster=hub, trader_manager=TraderManager(store=store))
 
     event = await listener.process_payload(
-        "asa_live",
+        "ggs_live",
         {
-            "event_key": "asa-100",
-            "event_status": "35",
-            "event_final_result": "1 - 0",
-            "message_id": "asa-same-1",
+            "match_id": "ggs-100",
+            "score": {"home": 1, "away": 0},
+            "clock": "35",
+            "message_id": "ggs-same-1",
             "ts": "2026-05-03T12:00:05Z",
         },
     )
 
     broadcasts = await hub.drain()
     external_messages = [row for row in broadcasts if row.get("topic") == "external.match"]
-    asa_match = await store.get_json(f"asa:match:{guid}")
+    ggs_match = await store.get_json(f"ggs:match:{guid}")
 
     assert event is None
-    assert asa_match["updated_at_utc"] == "2026-05-03T12:00:05Z"
+    assert ggs_match["updated_at_utc"] == "2026-05-03T12:00:05Z"
     assert external_messages
     assert external_messages[-1]["payload"]["guid"] == guid
     assert external_messages[-1]["payload"]["score_home"] == 1
@@ -367,35 +372,33 @@ async def test_listener_broadcasts_external_match_even_when_values_are_unchanged
 
 
 @pytest.mark.asyncio
-async def test_listener_infers_asa_score_from_goal_events_when_top_level_score_is_missing():
+async def test_listener_records_ggs_score_change_when_score_is_present():
     store, guid = await seed_store()
     await store.set_json(
-        f"asa:match:{guid}",
-        {"source": "asa", "match_id": "asa-100", "inplay_id": "asa-100", "score_home": 1, "score_away": 0},
+        f"ggs:match:{guid}",
+        {"source": "ggs", "match_id": "ggs-100", "inplay_id": "ggs-100", "score_home": 1, "score_away": 0},
     )
-    await store.set_text("idx:asa:inplay:asa-100", guid)
+    await store.set_text("idx:ggs:inplay:ggs-100", guid)
+    await store.set_text("idx:ggs:id:ggs-100", guid)
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
     event = await listener.process_payload(
-        "asa_live",
+        "ggs_live",
         {
-            "event_key": "asa-100",
-            "event_status": "32",
-            "goalscorers": [
-                {"time": "10", "score": "1 - 0", "home_scorer": "A"},
-                {"time": "32", "score": "2 - 0", "home_scorer": "B", "info": "Penalty"},
-            ],
-            "message_id": "asa-goal-events-1",
+            "match_id": "ggs-100",
+            "score": {"home": 2, "away": 0},
+            "clock": "32",
+            "message_id": "ggs-goal-events-1",
         },
     )
 
-    asa_match = await store.get_json(f"asa:match:{guid}")
+    ggs_match = await store.get_json(f"ggs:match:{guid}")
     match_logs = await store.stream("stream:match_logs")
 
     assert event is not None
     assert "score_home" in event["changed_fields"]
-    assert asa_match["score_home"] == 2
-    assert asa_match["score_away"] == 0
+    assert ggs_match["score_home"] == 2
+    assert ggs_match["score_away"] == 0
     assert match_logs[0]["event_kind"] == "score_changed"
     assert match_logs[0]["message"] == "比分变化 1-0 -> 2-0"
 
@@ -442,79 +445,76 @@ async def test_listener_ignores_pm_sports_score_regression_without_triggering_tr
 
 
 @pytest.mark.asyncio
-async def test_listener_processes_already_normalized_asa_ws_payload_without_losing_score():
+async def test_listener_processes_already_normalized_ggs_ws_payload_without_losing_score():
     store, guid = await seed_store()
     await store.set_json(
-        f"asa:match:{guid}",
-        {"source": "asa", "match_id": "asa-100", "inplay_id": "asa-100", "score_home": 0, "score_away": 0},
+        f"ggs:match:{guid}",
+        {"source": "ggs", "match_id": "ggs-100", "inplay_id": "ggs-100", "score_home": 0, "score_away": 0},
     )
-    await store.set_text("idx:asa:id:asa-100", guid)
+    await store.set_text("idx:ggs:id:ggs-100", guid)
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
     event = await listener.process_payload(
-        "asa_live",
+        "ggs_live",
         {
-            "source": "asa",
-            "match_id": "asa-100",
-            "inplay_id": "asa-100",
+            "source": "ggs",
+            "match_id": "ggs-100",
+            "inplay_id": "ggs-100",
             "home_team": "Arsenal",
             "away_team": "Chelsea",
             "start_time_utc": "2026-05-01T19:00:00Z",
             "score": {"home": 1, "away": 0},
             "score_home": 1,
             "score_away": 0,
-            "corners": {"home": 8, "away": 3},
             "clock": "12",
             "period": "1H",
         },
     )
 
-    asa_match = await store.get_json(f"asa:match:{guid}")
+    ggs_match = await store.get_json(f"ggs:match:{guid}")
     match_logs = await store.stream("stream:match_logs")
 
     assert event is not None
-    assert asa_match["score_home"] == 1
-    assert asa_match["score_away"] == 0
-    assert asa_match["corners"] == {"home": 8, "away": 3}
+    assert ggs_match["score_home"] == 1
+    assert ggs_match["score_away"] == 0
     assert [row["message"] for row in match_logs] == ["比分变化 0-0 -> 1-0"]
 
 
 @pytest.mark.asyncio
-async def test_listener_keeps_previous_asa_values_when_ws_payload_omits_fields():
+async def test_listener_keeps_previous_ggs_values_when_ws_payload_omits_fields():
     store, guid = await seed_store()
     await store.set_json(
-        f"asa:match:{guid}",
+        f"ggs:match:{guid}",
         {
-            "source": "asa",
-            "match_id": "asa-100",
-            "inplay_id": "asa-100",
+            "source": "ggs",
+            "match_id": "ggs-100",
+            "inplay_id": "ggs-100",
             "score_home": 3,
             "score_away": 0,
             "yellow_cards": {"home": 0, "away": 1},
             "corners": {"home": 1, "away": 0},
         },
     )
-    await store.set_text("idx:asa:inplay:asa-100", guid)
+    await store.set_text("idx:ggs:inplay:ggs-100", guid)
+    await store.set_text("idx:ggs:id:ggs-100", guid)
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
     event = await listener.process_payload(
-        "asa_live",
+        "ggs_live",
         {
-            "event_key": "asa-100",
-            "statistics": [{"type": "On Target", "home": "9", "away": "1"}],
-            "message_id": "asa-partial-1",
+            "match_id": "ggs-100",
+            "message_id": "ggs-partial-1",
         },
     )
 
-    asa_match = await store.get_json(f"asa:match:{guid}")
+    ggs_match = await store.get_json(f"ggs:match:{guid}")
     match_logs = await store.stream("stream:match_logs")
 
-    assert event is not None
-    assert asa_match["score_home"] == 3
-    assert asa_match["score_away"] == 0
-    assert asa_match["yellow_cards"] == {"home": 0, "away": 1}
-    assert asa_match["corners"] == {"home": 1, "away": 0}
-    assert asa_match["shots_on_target"] == {"home": 9, "away": 1}
+    assert event is None
+    assert ggs_match["score_home"] == 3
+    assert ggs_match["score_away"] == 0
+    assert ggs_match["yellow_cards"] == {"home": 0, "away": 1}
+    assert ggs_match["corners"] == {"home": 1, "away": 0}
     assert match_logs == []
 
 
@@ -559,23 +559,24 @@ async def test_discriminator_writes_match_process_logs_for_external_match_change
 async def test_discriminator_logs_penalties_but_not_regular_stat_changes():
     store, guid = await seed_store()
     await store.set_json(
-        f"asa:match:{guid}",
-        {"source": "asa", "match_id": "asa-100", "inplay_id": "asa-100"},
+        f"gs:match:{guid}",
+        {"source": "gs", "match_id": "live-100", "inplay_id": "live-100"},
     )
-    await store.set_text("idx:asa:inplay:asa-100", guid)
+    await store.set_text("idx:gs:inplay:live-100", guid)
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
-    await listener.process_payload(
-        "asa_live",
-        {
-            "event_key": "asa-100",
-            "event_status": "32",
-            "goalscorers": [
-                {"time": "32", "score": "0 - 0", "home_scorer": "A", "info": "Penalty"},
-            ],
-            "statistics": [{"type": "On Target", "home": "2", "away": "1"}],
-            "message_id": "asa-process-penalty-1",
+    await listener._discriminator.process_external_state(
+        source="gs_live",
+        guid=guid,
+        payload={"message_id": "gs-process-penalty-1"},
+        previous={},
+        current={
+            "penalties": [{"time": "32", "score": "0 - 0", "home_scorer": "A", "info": "Penalty"}],
+            "shots_on_target": {"home": 2, "away": 1},
+            "updated_at_utc": "2026-05-03T12:00:01Z",
         },
+        mapping={"penalties": "penalties", "shots_on_target": "shots_on_target"},
+        ws_message={"topic": "trader.event", "payload": {"event_id": guid}},
     )
 
     match_logs = await store.stream("stream:match_logs")
@@ -591,18 +592,18 @@ async def test_discriminator_does_not_log_duplicate_external_values_from_memory(
     listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
 
     await listener._discriminator.process_external_state(
-        source="asa_live",
+        source="ggs_live",
         guid=guid,
-        payload={"message_id": "asa-1"},
+        payload={"message_id": "ggs-1"},
         previous={},
         current={"score_home": 1, "score_away": 0, "updated_at_utc": "2026-05-03T12:00:01Z"},
         mapping={"score_home": "score_home", "score_away": "score_away"},
         ws_message={"topic": "trader.event", "payload": {"event_id": guid}},
     )
     await listener._discriminator.process_external_state(
-        source="asa_live",
+        source="ggs_live",
         guid=guid,
-        payload={"message_id": "asa-2"},
+        payload={"message_id": "ggs-2"},
         previous={},
         current={"score_home": 1, "score_away": 0, "updated_at_utc": "2026-05-03T12:00:10Z"},
         mapping={"score_home": "score_home", "score_away": "score_away"},
@@ -647,7 +648,7 @@ async def test_discriminator_logs_first_known_score_when_previous_score_is_missi
     listener = Listener(store=store, broadcaster=BroadcastHub())
 
     await listener._discriminator.process_external_state(
-        source="asa_live",
+        source="ggs_live",
         guid="guid-match-1",
         payload={},
         previous={},
@@ -876,6 +877,55 @@ async def test_listener_marks_source_disconnected_when_transport_reports_disconn
 
     assert status["pm_user_ws_connected"] is False
     assert status["polymarket_ws_connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_listener_keeps_ggs_ws_status_separate_from_http_poll_status():
+    store, _guid = await seed_store()
+    http_source = StatusSource("ggs_http_poll", [{"__connection_status__": "connected"}])
+    ws_source = StatusSource("ggs_live", [{"__connection_status__": "disconnected"}])
+    listener = Listener(
+        store=store,
+        broadcaster=BroadcastHub(),
+        trader_manager=TraderManager(store=store),
+        sources=[http_source, ws_source],
+        reconnect_delay_seconds=0.01,
+    )
+
+    await listener.start()
+    try:
+        await _wait_until(lambda: http_source.delivered >= 1 and ws_source.delivered >= 1)
+        status = listener.status()
+    finally:
+        await listener.stop()
+
+    assert status["ggs_ws_enabled"] is True
+    assert status["ggs_ws_connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_listener_accepts_ggs_http_poll_payloads_as_ggs_match_updates():
+    store, guid = await seed_store()
+    pm = await store.get_json(f"pm:match:{guid}")
+    await store.set_json(f"pm:match:{guid}", {**pm, "status": "live"})
+    await store.set_text("idx:ggs:id:ggs-100", guid)
+    listener = Listener(store=store, broadcaster=BroadcastHub(), trader_manager=TraderManager(store=store))
+
+    event = await listener.process_payload(
+        "ggs_http_poll",
+        {
+            "match_id": "ggs-100",
+            "score": {"home": 1, "away": 0},
+            "status": "live",
+            "match_time": "1H 10:00",
+            "ts": "2026-05-01T19:10:00Z",
+            "message_id": "ggs-http-1",
+        },
+    )
+
+    assert event is not None
+    assert event["source"] == "ggs_live"
+    assert event["score_home"] == 1
 
 
 class FlakySource:

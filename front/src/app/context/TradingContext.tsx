@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from "react";
 import {
   CollectorSettings,
+  MARKET_WS_URL,
   fetchCollectorSettings,
   fetchHistoryMatches,
   fetchMatches,
@@ -57,7 +58,7 @@ export interface Match {
   moneylineVolume: number;
   totalVolume: number;
   gameId?: number | null;
-  externalSource?: "gs" | "asa" | null;
+  externalSource?: "gs" | "ggs" | null;
   externalMatchId?: string | null;
   externalBound: boolean;
   bindingStatus?: string | null;
@@ -134,7 +135,7 @@ export const TradingProvider = ({ children }: { children: ReactNode }) => {
   const [collectorSettings, setCollectorSettings] = useState<CollectorSettings>({
     collection_interval_minutes: 5,
     football_volume_threshold_k: 500,
-    external_source: "asa",
+    external_source: "ggs",
   });
 
   const addLog = (message: string, type: TradeLog["type"]) => {
@@ -218,7 +219,7 @@ export const TradingProvider = ({ children }: { children: ReactNode }) => {
       if (stopped) {
         return;
       }
-      ws = new WebSocket("ws://127.0.0.1:8000/api/v1/ws/market");
+      ws = new WebSocket(MARKET_WS_URL);
       ws.onmessage = (event) => {
         try {
           const parsed = JSON.parse(event.data);

@@ -1,17 +1,17 @@
 # Redis 数据设计
 
-Redis 是 PDT2.1 第一版唯一运行存储。设计目标不是做复杂数据仓库，而是把比赛当前态、行情时序、外部数据源、交易员账本和运行日志分开，并保证 PM、GS、ASA 等数据源互不覆盖、互不污染。
+Redis 是 PDT2.1 第一版唯一运行存储。设计目标不是做复杂数据仓库，而是把比赛当前态、行情时序、外部数据源、交易员账本和运行日志分开，并保证 PM、GS、GGS 等数据源互不覆盖、互不污染。
 
 ## 1. 总原则
 
 - `guid` 是系统内比赛唯一 ID。
-- PM、GS、ASA 分开存：PM 只写 `pm:*`，GS 只写 `gs:*`，ASA 只写 `asa:*`。
+- PM、GS、GGS 分开存：PM 只写 `pm:*`，GS 只写 `gs:*`，GGS 只写 `ggs:*`。
 - 多数据源只通过 `binding:{guid}` 和 `idx:*` 建立关系。
-- 展示 API 可以临时聚合 PM/GS/ASA，但 Redis 原始当前态不混写。
+- 展示 API 可以临时聚合 PM/GS/GGS，但 Redis 原始当前态不混写。
 - 行情 ticks、ALL 采集点、LIVE 10 秒点、比赛日志、交易记录都按追加方式写入。
 - 已写入的历史数据不回读重写、不过滤、不补点、不拟合；存的是什么就显示什么。
 - PM market ticks 只属于行情链路，不进入判别器。
-- PM sports、GS、ASA 等比赛数据进入判别器，形成比赛变化信号。
+- PM sports、GS、GGS 等比赛数据进入判别器，形成比赛变化信号。
 - 交易模块维护最新行情内存态，供策略和交易员快速查询；Redis 保存当前态和可追溯的追加数据。
 - 交易员、账户、订单、成交、日志和比赛数据分开。
 - 实盘账号按 `provider + account_alias` 隔离。当前 provider 是 PM，后续可以增加 KS。
@@ -23,8 +23,8 @@ Redis 是 PDT2.1 第一版唯一运行存储。设计目标不是做复杂数据
 | --- | --- | --- | --- |
 | PM 比赛 | `pm:match:{guid}` | 每场 PM 比赛一条当前态，Collector/PM sports/PM market 更新 | `guid`, `pm_event_id`, `slug`, `league`, `home_team`, `away_team`, `start_time_utc`, `status`, `score_home`, `score_away`, `total_volume`, `moneyline_volume`, `home/draw/away_asset_id`, `home/draw/away_ask1`, `home/draw/away_bid1`, `updated_at_utc` |
 | GS 比赛 | `gs:match:{guid}` | 每场 GS 比赛一条当前态，GS HTTP/WS 更新 | `guid`, `gs_match_id`, `gs_pregame_id`, `gs_inplay_id`, `league`, `home_team`, `away_team`, `start_time_utc`, `status`, `score_home`, `score_away`, `match_time`, `period`, `clock`, `red_cards`, `yellow_cards`, `corners`, `shots_on_target`, `events`, `lineups`, `updated_at_utc` |
-| ASA 比赛 | `asa:match:{guid}` | 每场 ASA 比赛一条当前态，ASA HTTP/WS 更新 | `guid`, `asa_event_key`, `league`, `home_team`, `away_team`, `start_time_utc`, `status`, `score_home`, `score_away`, `match_time`, `period`, `red_cards`, `yellow_cards`, `corners`, `shots_on_target`, `penalties`, `updated_at_utc` |
-| 数据源绑定 | `binding:{guid}` | PM 基准比赛与 GS/ASA 比赛的对应关系 | `guid`, `pm_event_id`, `pm_slug`, `pm_condition_id`, `pm_*_asset_id`, `gs_match_id`, `gs_inplay_id`, `asa_event_key`, `confidence`, `status`, `created_at_utc`, `updated_at_utc` |
+| GGS 比赛 | `ggs:match:{guid}` | 每场 GGS 比赛一条当前态，GGS HTTP/WS 更新 | `guid`, `ggs_match_id`, `ggs_inplay_id`, `league`, `home_team`, `away_team`, `start_time_utc`, `status`, `score_home`, `score_away`, `match_time`, `period`, `red_cards`, `yellow_cards`, `corners`, `shots_on_target`, `penalties`, `updated_at_utc` |
+| 数据源绑定 | `binding:{guid}` | PM 基准比赛与 GS/GGS 比赛的对应关系 | `guid`, `pm_event_id`, `pm_slug`, `pm_condition_id`, `pm_*_asset_id`, `gs_match_id`, `gs_inplay_id`, `ggs_match_id`, `ggs_inplay_id`, `confidence`, `status`, `created_at_utc`, `updated_at_utc` |
 | PM 当前盘口 | `orderbook:{guid}:{outcome}` | PM moneyline 高频盘口当前态 | `guid`, `outcome_key`, `asset_id`, `ask1`, `bid1`, `updated_at_utc`, `source` |
 | ALL 采集曲线 | `series:pm:collector:{guid}` | Collector 每次 HTTP 采集到的 moneyline ask1/bid1 追加点 | `guid`, `sample_ts_utc`, `home/draw/away_ask1`, `home/draw/away_bid1`, `total_volume`, `moneyline_volume` |
 | LIVE 原始 ticks | `series:pm:ticks:{guid}` | PM market WS 比赛中收到的原始行情 ticks 追加点 | `guid`, `received_at_utc`, `asset_id`, `outcome_key`, `ask1`, `bid1`, `raw_ref` |
@@ -54,8 +54,8 @@ idx:gs:id:{gs_match_id} -> guid
 idx:gs:pregame:{gs_pregame_id} -> guid
 idx:gs:inplay:{gs_inplay_id} -> guid
 
-idx:asa:event:{asa_event_key} -> guid
-idx:asa:inplay:{asa_event_key} -> guid
+idx:ggs:id:{ggs_match_id} -> guid
+idx:ggs:inplay:{ggs_inplay_id} -> guid
 
 idx:guid:{guid} -> guid
 idx:match:status:{status}:{guid} -> guid
@@ -69,7 +69,7 @@ idx:traders -> latest trader id
 - PM sports WS 可以用 `event_id`、`slug`、`game_id` 找 `guid`。
 - PM market WS 用 `asset_id` 找 `guid|outcome_key`，只更新对应 outcome 的盘口。
 - GS live WS 用 `inplay_id` 或 `match_id` 找 `guid`。
-- ASA WS 用 `event_key` 找 `guid`。
+- GGS WS 用 `match_id` 或 `inplay_id` 找 `guid`。
 - 账号索引用于 PM user WS、后续 KS user WS 把账户事件路由到对应 `account_alias`。
 - `idx:traders` 当前只是辅助信息，API 主要通过 `trader:*:account` 等 key 扫描持久化 trader 状态。
 
@@ -79,11 +79,11 @@ idx:traders -> latest trader id
 
 - `pm:match:{guid}`
 - `gs:match:{guid}`
-- `asa:match:{guid}`
+- `ggs:match:{guid}`
 - `binding:{guid}`
 - `idx:pm:*`
 - `idx:gs:*`
-- `idx:asa:*`
+- `idx:ggs:*`
 - `idx:guid:*`
 - `idx:match:*`
 - `series:pm:collector:{guid}`
@@ -101,7 +101,7 @@ LIVE 原始 ticks 调试期保留 72 小时：
 短 TTL 当前态：
 
 - `orderbook:{guid}:{outcome}`：10 分钟。
-- `pm:raw:*`、`gs:raw:*`、`asa:raw:*`：10 分钟。
+- `pm:raw:*`、`gs:raw:*`、`ggs:raw:*`：10 分钟。
 
 长期保留，除非用户删除交易员或账户：
 
@@ -158,11 +158,11 @@ stream:match_logs
 stream:dead_letters
 ```
 
-ASA 数据源只允许写：
+GGS 数据源只允许写：
 
 ```text
-asa:match:{guid}
-idx:asa:*
+ggs:match:{guid}
+idx:ggs:*
 stream:standard_events
 stream:match_logs
 stream:dead_letters
@@ -173,11 +173,11 @@ Collector 可以写：
 ```text
 pm:match:{guid}
 gs:match:{guid}
-asa:match:{guid}
+ggs:match:{guid}
 binding:{guid}
 idx:pm:*
 idx:gs:*
-idx:asa:*
+idx:ggs:*
 idx:guid:{guid}
 idx:match:status:{status}:{guid}
 series:pm:collector:{guid}
@@ -193,7 +193,7 @@ stream:fills
 stream:match_logs
 ```
 
-交易模块可以读取 PM/GS/ASA 当前态、最新行情内存态和 provider 账号缓存，但策略不能直接写 Redis、不能直接调用 PM/KS gateway。
+交易模块可以读取 PM/GS/GGS 当前态、最新行情内存态和 provider 账号缓存，但策略不能直接写 Redis、不能直接调用 PM/KS gateway。
 
 ## 6. 交易模块内存态
 
@@ -249,7 +249,7 @@ stream:trader:{trader_id}:logs
 
 ## 8. 不做的复杂化
 
-- 不把 PM、GS、ASA 合并成一个 `match:{guid}` 主表。
+- 不把 PM、GS、GGS 合并成一个 `match:{guid}` 主表。
 - 不在 Redis 里做多市场通用框架。
 - 不实现 KS/TRD/篮球业务表。只保留最小 `provider` 字段和 gateway 形态，避免后续 PM/KS 多账户接入时重写交易员和策略。
 - 不在 Redis 里做策略计算。
@@ -263,11 +263,11 @@ stream:trader:{trader_id}:logs
 ```text
 pm:match:{guid}
 + gs:match:{guid}
-+ asa:match:{guid}
++ ggs:match:{guid}
 + binding:{guid}
 + orderbook:{guid}:home/draw/away
 + series:pm:collector:{guid}
 + series:pm:10s:{guid}
 ```
 
-聚合只发生在 API 返回时，不反写成一个混合 Redis 记录。这样 PM 更新不会覆盖 GS/ASA 比分，GS/ASA 更新也不会覆盖 PM 盘口。
+聚合只发生在 API 返回时，不反写成一个混合 Redis 记录。这样 PM 更新不会覆盖 GS/GGS 比分，GS/GGS 更新也不会覆盖 PM 盘口。

@@ -9,15 +9,16 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from .allsportsapi import normalize_allsportsapi_ws_payload
 from .discriminator import MatchDiscriminator
+from .ggscore import normalize_ggscore_match
 from .goalserve import normalize_goalserve_ws_payload
 from .timeseries import CURRENT_STATE_TTL_SECONDS, MATCH_RELATED_TTL_SECONDS, append_pm_tick_snapshot, normalize_ts
 
 
 PM_SOURCE_NAMES = {"pm_sports", "pm_market", "pm_user"}
 GS_SOURCE_NAMES = {"gs_live"}
-ASA_SOURCE_NAMES = {"asa_live"}
+GGS_SOURCE_NAMES = {"ggs_live"}
+GGS_PAYLOAD_SOURCE_NAMES = {"ggs_live", "ggs_http_poll"}
 CONNECTION_STATUS_FIELD = "__connection_status__"
 CONNECTION_STATUS_CONNECTED = "connected"
 CONNECTION_STATUS_DISCONNECTED = "disconnected"
@@ -144,24 +145,24 @@ class Listener:
     def status(self) -> dict[str, Any]:
         pm_states = [state for name, state in self._states.items() if name in PM_SOURCE_NAMES]
         gs_states = [state for name, state in self._states.items() if name in GS_SOURCE_NAMES]
-        asa_states = [state for name, state in self._states.items() if name in ASA_SOURCE_NAMES]
+        ggs_states = [state for name, state in self._states.items() if name in GGS_SOURCE_NAMES]
         pm_connected = bool(pm_states) and any(state["connected"] for state in pm_states)
         gs_connected = bool(gs_states) and any(state["connected"] for state in gs_states)
-        asa_connected = bool(asa_states) and any(state["connected"] for state in asa_states)
+        ggs_connected = bool(ggs_states) and any(state["connected"] for state in ggs_states)
         pm_last = _latest_state(pm_states)
         gs_last = _latest_state(gs_states)
-        asa_last = _latest_state(asa_states)
+        ggs_last = _latest_state(ggs_states)
         pm_market = self._states.get("pm_market")
         pm_user = self._states.get("pm_user")
         pm_sports = self._states.get("pm_sports")
         gs_live = self._states.get("gs_live")
-        asa_live = self._states.get("asa_live")
+        ggs_live = self._states.get("ggs_live")
         return {
             "external_stream_enabled": bool(self._sources),
             "external_stream_started": self._running and bool(self._sources),
             "polymarket_ws_enabled": any(name in PM_SOURCE_NAMES for name in self._states),
             "goalserve_ws_enabled": any(name in GS_SOURCE_NAMES for name in self._states),
-            "allsports_ws_enabled": any(name in ASA_SOURCE_NAMES for name in self._states),
+            "ggs_ws_enabled": ggs_live is not None,
             "polymarket_ws_connected": pm_connected,
             "pm_market_ws_enabled": pm_market is not None,
             "pm_market_ws_connected": bool(pm_market and pm_market["connected"]),
@@ -171,9 +172,7 @@ class Listener:
             "pm_sports_ws_connected": bool(pm_sports and pm_sports["connected"]),
             "gs_ws_enabled": gs_live is not None,
             "gs_ws_connected": bool(gs_live and gs_live["connected"]),
-            "asa_ws_enabled": asa_live is not None,
-            "asa_ws_connected": bool(asa_live and asa_live["connected"]),
-            "allsports_ws_connected": asa_connected,
+            "ggs_ws_connected": bool(ggs_live and ggs_live["connected"]),
             "polymarket_last_connected_at": pm_last.get("last_connected_at") if pm_last else None,
             "polymarket_last_event_at": pm_last.get("last_event_at") if pm_last else None,
             "polymarket_last_error": pm_last.get("last_error") if pm_last else None,
@@ -182,9 +181,9 @@ class Listener:
             "goalserve_last_connected_at": gs_last.get("last_connected_at") if gs_last else None,
             "goalserve_last_event_at": gs_last.get("last_event_at") if gs_last else None,
             "goalserve_last_error": gs_last.get("last_error") if gs_last else None,
-            "allsports_last_connected_at": asa_last.get("last_connected_at") if asa_last else None,
-            "allsports_last_event_at": asa_last.get("last_event_at") if asa_last else None,
-            "allsports_last_error": asa_last.get("last_error") if asa_last else None,
+            "ggs_last_connected_at": ggs_last.get("last_connected_at") if ggs_last else None,
+            "ggs_last_event_at": ggs_last.get("last_event_at") if ggs_last else None,
+            "ggs_last_error": ggs_last.get("last_error") if ggs_last else None,
         }
 
     async def process_payload(self, source: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -200,8 +199,8 @@ class Listener:
             return await self._process_pm_user(payload)
         if source == "gs_live":
             return await self._process_gs_live(payload)
-        if source == "asa_live":
-            return await self._process_asa_live(payload)
+        if source in GGS_PAYLOAD_SOURCE_NAMES:
+            return await self._process_ggs_live(payload)
         await self._dead_letter(source, payload, "unsupported_source")
         return None
 
@@ -287,70 +286,58 @@ class Listener:
         if self._timeseries_resampler is not None and hasattr(self._timeseries_resampler, "forget_match"):
             self._timeseries_resampler.forget_match(guid)
 
-    async def _process_asa_live(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        payload = normalize_allsportsapi_ws_payload(payload)
+    async def _process_ggs_live(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        payload = _normalize_ggs_live_payload(payload)
         guid = None
         if payload.get("inplay_id"):
-            guid = await self._store.get_text(f"idx:asa:inplay:{payload.get('inplay_id')}")
+            guid = await self._store.get_text(f"idx:ggs:inplay:{payload.get('inplay_id')}")
         if guid is None and payload.get("match_id"):
-            guid = await self._store.get_text(f"idx:asa:id:{payload.get('match_id')}")
+            guid = await self._store.get_text(f"idx:ggs:id:{payload.get('match_id')}")
         if not guid:
-            await self._dead_letter("asa_live", payload, "unknown_guid")
+            await self._dead_letter("ggs_live", payload, "unknown_guid")
             return None
         pm = await self._store.get_json(f"pm:match:{guid}") or {}
         if _finished_for_more_than(pm, payload.get("ts"), minutes=15):
             return None
-        previous = await self._store.get_json(f"asa:match:{guid}") or {}
-        next_asa = dict(previous)
+        previous = await self._store.get_json(f"ggs:match:{guid}") or {}
+        next_ggs = dict(previous)
         score = payload.get("score") or {}
         if score.get("home") is not None:
-            next_asa["score_home"] = score["home"]
+            next_ggs["score_home"] = score["home"]
         if score.get("away") is not None:
-            next_asa["score_away"] = score["away"]
+            next_ggs["score_away"] = score["away"]
         for key in (
             "status",
             "match_time",
             "period",
             "clock",
-            "red_cards",
-            "yellow_cards",
-            "substitutions",
-            "var_events",
-            "penalties",
-            "free_kicks",
-            "corners",
-            "shots_on_target",
-            "events",
-            "lineups",
             "home_logo_url",
             "away_logo_url",
+            "home_team",
+            "away_team",
+            "home_team_id",
+            "away_team_id",
         ):
             if key in payload and _has_meaningful_value(payload[key]):
-                next_asa[key] = payload[key]
-        next_asa["source"] = "asa"
-        next_asa["guid"] = guid
-        next_asa["updated_at_utc"] = normalize_ts(payload.get("ts"))
-        await self._store.set_json(f"asa:match:{guid}", next_asa, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
-        await self._store.set_json(f"external:match:{guid}", next_asa, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
-        await self._publish_external_match(guid, next_asa)
-        await self._mark_pm_finished_from_external(guid, next_asa, source="asa_live")
+                next_ggs[key] = payload[key]
+        next_ggs["source"] = "ggs"
+        next_ggs["guid"] = guid
+        next_ggs["updated_at_utc"] = normalize_ts(payload.get("ts"))
+        await self._store.set_json(f"ggs:match:{guid}", next_ggs, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
+        await self._store.set_json(f"external:match:{guid}", next_ggs, ttl_seconds=CURRENT_STATE_TTL_SECONDS)
+        await self._publish_external_match(guid, next_ggs)
+        await self._mark_pm_finished_from_external(guid, next_ggs, source="ggs_live")
         event = await self._discriminator.process_external_state(
-            source="asa_live",
+            source="ggs_live",
             guid=guid,
             payload=_with_pm_score_snapshot(payload, pm),
             previous=previous,
-            current=next_asa,
+            current=next_ggs,
             mapping={
                 "score_home": "score_home",
                 "score_away": "score_away",
-                "red_cards": "red_cards",
-                "yellow_cards": "yellow_cards",
-                "penalties": "penalties",
-                "free_kicks": "free_kicks",
-                "corners": "corners",
-                "shots_on_target": "shots_on_target",
             },
-            ws_message=_trader_event(guid, pm, _source_event_clock(next_asa)),
+            ws_message=_trader_event(guid, pm, _source_event_clock(next_ggs)),
         )
         return event
 
@@ -601,6 +588,20 @@ def _normalize_gs_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("score") or payload.get("inplay_id") or payload.get("match_id"):
         return payload
     return normalize_goalserve_ws_payload(payload)
+
+
+def _normalize_ggs_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("match_id") or payload.get("inplay_id"):
+        row = dict(payload)
+        row["source"] = "ggs"
+        score = row.get("score")
+        if isinstance(score, dict):
+            row.setdefault("score_home", score.get("home"))
+            row.setdefault("score_away", score.get("away"))
+        elif row.get("score_home") is not None or row.get("score_away") is not None:
+            row["score"] = {"home": row.get("score_home"), "away": row.get("score_away")}
+        return row
+    return normalize_ggscore_match(payload)
 
 
 def _latest_state(states: list[dict[str, Any]]) -> dict[str, Any]:

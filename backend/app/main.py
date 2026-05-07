@@ -8,12 +8,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .allsportsapi import AllSportsAPIHttpClient, AllSportsAPIWsSource
 from .api import router
 from .auth import AuthManager
 from .collector import Collector
 from .connectivity import ConnectivityChecker
 from .config import Settings, load_settings
+from .ggscore import GGScoreHttpClient, GGScoreHttpPollSource, GGScoreWsSource
 from .goalserve import GOALSERVE_WS_URL_TEMPLATE, GoalserveHttpClient, GoalserveWsSource
 from .listener import BroadcastHub, Listener
 from .models import CollectorSettings
@@ -45,7 +45,7 @@ def create_app(
         store=app_store,
         clob_quote_client=PMClobQuoteClient(host=app_settings.pm_clob_host),
     )
-    # 默认本地运行会接 PM HTTP；GS HTTP/WS 和 PM WS 都用显式开关控制。
+    # 默认本地运行会接 PM HTTP 和 GGS 外部源；GS 和 PM WS 仍由显式开关控制。
     pm_client = (
         PMGammaHttpClient(base_url=app_settings.pm_http_url)
         if app_settings.pm_http_enabled and app_settings.pm_http_url
@@ -56,13 +56,15 @@ def create_app(
         if app_settings.goalserve_http_enabled and app_settings.goalserve_api_key
         else None
     )
-    asa_client = (
-        AllSportsAPIHttpClient(
-            api_key=app_settings.allsports_api_key,
-            base_url=app_settings.allsports_http_url,
-            timezone_name=app_settings.auth_timezone,
+    ggs_client = (
+        GGScoreHttpClient(
+            app_id=app_settings.ggs_app_id,
+            app_secret=app_settings.ggs_app_secret,
+            base_url=app_settings.ggs_http_url,
         )
-        if app_settings.allsports_http_enabled and app_settings.allsports_api_key
+        if (app_settings.ggs_http_enabled or app_settings.ggs_http_poll_enabled)
+        and app_settings.ggs_app_id
+        and app_settings.ggs_app_secret
         else None
     )
     default_collector_settings = CollectorSettings()
@@ -70,7 +72,7 @@ def create_app(
         store=app_store,
         pm_client=pm_client,
         gs_client=gs_client,
-        asa_client=asa_client,
+        ggs_client=ggs_client,
         broadcaster=app_broadcaster,
         trader_manager=app_trader,
     )
@@ -107,12 +109,21 @@ def create_app(
                 ws_url_template=app_settings.gs_ws_url or GOALSERVE_WS_URL_TEMPLATE,
             )
         )
-    if app_settings.allsports_ws_enabled and app_settings.allsports_api_key:
+    if app_settings.ggs_http_poll_enabled and ggs_client is not None:
         listener_sources.append(
-            AllSportsAPIWsSource(
-                api_key=app_settings.allsports_api_key,
-                endpoint=app_settings.allsports_ws_url,
-                timezone_name=app_settings.auth_timezone,
+            GGScoreHttpPollSource(
+                store=app_store,
+                client=ggs_client,
+                interval_seconds=app_settings.ggs_http_poll_interval_seconds,
+            )
+        )
+    if app_settings.ggs_ws_enabled and app_settings.ggs_app_id and app_settings.ggs_app_secret:
+        listener_sources.append(
+            GGScoreWsSource(
+                app_id=app_settings.ggs_app_id,
+                app_secret=app_settings.ggs_app_secret,
+                endpoint=app_settings.ggs_ws_url,
+                sport_id=app_settings.ggs_sport_id,
             )
         )
     app_connectivity_checker = connectivity_checker or ConnectivityChecker(settings=app_settings)
@@ -144,15 +155,11 @@ def create_app(
         app.state.connectivity_checker = app_connectivity_checker
         app.state.soak_runner = app_soak_runner
         app.state.auth_manager = app_auth_manager
+        app.state.ggs_client = ggs_client
         app.state.timeseries_resampler = app_timeseries_resampler
         app.state.runtime = runtime
         app.state.enforce_collector_display_filter = collector is None
-        stored_collector_settings = await app_store.get_json("settings:collector")
-        if isinstance(stored_collector_settings, dict):
-            app.state.collector_settings = CollectorSettings(**stored_collector_settings)
-        else:
-            app.state.collector_settings = default_collector_settings
-            await app_store.set_json("settings:collector", default_collector_settings.model_dump())
+        app.state.collector_settings = await _load_collector_settings(app_store, default_collector_settings)
         if collector is None:
             app_collector.set_interval_minutes(app.state.collector_settings.collection_interval_minutes)
             app_collector.set_filters(
@@ -171,8 +178,8 @@ def create_app(
                 await pm_client.close()
             if gs_client is not None:
                 await gs_client.close()
-            if asa_client is not None:
-                await asa_client.close()
+            if ggs_client is not None:
+                await ggs_client.close()
             await app_store.close()
 
     app = FastAPI(title="PDT2.1", lifespan=lifespan)
@@ -198,6 +205,26 @@ def create_app(
 
 
 app = create_app()
+
+
+async def _load_collector_settings(store: Any, default_settings: CollectorSettings) -> CollectorSettings:
+    """读取采集设置；旧外部源值无效时回落到当前默认 GGS，避免启动失败。"""
+
+    stored = await store.get_json("settings:collector")
+    if not isinstance(stored, dict):
+        await store.set_json("settings:collector", default_settings.model_dump())
+        return default_settings
+
+    candidate = dict(stored)
+    if candidate.get("external_source") not in {"gs", "ggs", "none"}:
+        candidate["external_source"] = default_settings.external_source
+    try:
+        settings = CollectorSettings(**candidate)
+    except ValueError:
+        settings = default_settings
+    if settings.model_dump() != stored:
+        await store.set_json("settings:collector", settings.model_dump())
+    return settings
 
 
 def _is_auth_exempt(request: Request) -> bool:

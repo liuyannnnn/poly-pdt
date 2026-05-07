@@ -28,7 +28,7 @@ export interface BackendMatchCard {
   draw_bid?: number | null;
   draw_ask?: number | null;
   draw_price?: number | null;
-  external_source?: "gs" | "asa" | null;
+  external_source?: "gs" | "ggs" | null;
   external_match_id?: string | null;
   external_bound?: boolean;
   binding_status?: string | null;
@@ -60,7 +60,7 @@ export interface UiMatch {
   moneylineVolume: number;
   totalVolume: number;
   gameId?: number | null;
-  externalSource?: "gs" | "asa" | null;
+  externalSource?: "gs" | "ggs" | null;
   externalMatchId?: string | null;
   externalBound: boolean;
   bindingStatus?: string | null;

@@ -26,7 +26,7 @@ def test_runtime_defaults_monitor_fixed_ws_connections(monkeypatch):
     assert settings.pm_sports_ws_enabled is True
     assert settings.pm_market_ws_enabled is True
     assert settings.goalserve_ws_enabled is False
-    assert settings.allsports_ws_enabled is True
+    assert settings.ggs_ws_enabled is True
 
 
 @pytest.mark.asyncio

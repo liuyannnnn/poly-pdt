@@ -37,7 +37,7 @@ export const Sidebar = () => {
   const [settings, setSettings] = useState({
     footballVol: 50,
     collectionInterval: 15,
-    externalSource: 'asa' as 'asa' | 'gs' | 'none'
+    externalSource: 'ggs' as 'ggs' | 'gs' | 'none'
   });
 
   useEffect(() => {
@@ -71,7 +71,7 @@ export const Sidebar = () => {
     setManualError(null);
     setManualLoading(true);
     try {
-      const source = collectorSettings.external_source === 'none' ? 'asa' : collectorSettings.external_source;
+      const source = collectorSettings.external_source === 'none' ? 'ggs' : collectorSettings.external_source;
       const rows = await fetchExternalMatchCandidates(match.id, source, 50);
       setManualCandidates(rows);
     } catch (error) {
@@ -220,10 +220,10 @@ export const Sidebar = () => {
                 <label className="text-sm text-gray-800 font-medium">外部数据源</label>
                 <select
                   value={settings.externalSource}
-                  onChange={(e) => setSettings({...settings, externalSource: e.target.value as 'asa' | 'gs' | 'none'})}
+                  onChange={(e) => setSettings({...settings, externalSource: e.target.value as 'ggs' | 'gs' | 'none'})}
                   className="bg-gray-50 border border-gray-200 rounded px-2 py-1 text-xs text-gray-900 focus:outline-none focus:border-[#10b981]"
                 >
-                  <option value="asa">AllSportsAPI</option>
+                  <option value="ggs">GGS</option>
                   <option value="gs">Goalserve</option>
                   <option value="none">不使用</option>
                 </select>

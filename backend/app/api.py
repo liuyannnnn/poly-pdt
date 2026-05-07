@@ -25,6 +25,7 @@ from .models import (
     TradingUpdatePayload,
 )
 from .pm_accounts import has_pm_account, public_pm_accounts_with_balances, public_pm_positions, public_pm_trades
+from .polymarket import is_secondary_sports_market_slug
 from .retention import cleanup_retention
 from .timeseries import get_series_rows
 
@@ -213,7 +214,7 @@ async def matches_history(request: Request, limit: int = 50, offset: int = 0) ->
 
 
 @router.get("/ticks")
-async def ticks(request: Request, match_id: str, limit: int = 1000) -> list[Any]:
+async def ticks(request: Request, match_id: str, limit: int | None = None) -> list[Any]:
     return await get_series_rows(request.app.state.store, f"series:pm:ticks:{match_id}", limit=limit)
 
 
@@ -221,8 +222,8 @@ async def ticks(request: Request, match_id: str, limit: int = 1000) -> list[Any]
 async def match_snapshots(
     request: Request,
     match_id: str,
-    limit: int = 1000,
-    series: str = "both",
+    limit: int | None = None,
+    series: str = "all",
 ) -> list[Any]:
     requested = series.strip().lower()
     keys: list[str]
@@ -239,7 +240,7 @@ async def match_snapshots(
         if isinstance(value, list):
             rows.extend(_enrich_snapshot_rows(match_id, pm, value))
     rows.sort(key=lambda row: row.get("snapshot_ts_utc") or "")
-    return rows[-limit:]
+    return rows[-limit:] if limit is not None and limit > 0 else rows
 
 
 @router.get("/accounts")
@@ -384,9 +385,9 @@ async def logs(
 @router.get("/external-source/match/{match_id}")
 async def external_source_match(request: Request, match_id: str) -> dict[str, Any]:
     source = str(request.app.state.collector_settings.external_source)
-    if source == "asa":
-        row = await request.app.state.store.get_json(f"asa:match:{match_id}") or {}
-        return _with_external_widget(row, source="asa", settings=request.app.state.settings, guid=match_id)
+    if source == "ggs":
+        row = await request.app.state.store.get_json(f"ggs:match:{match_id}") or {}
+        return _with_external_widget(row, source="ggs", settings=request.app.state.settings, guid=match_id)
     if source == "gs":
         row = await request.app.state.store.get_json(f"gs:match:{match_id}") or {}
         return _with_external_widget(row, source="gs", settings=request.app.state.settings, guid=match_id)
@@ -432,9 +433,9 @@ async def goalserve_match(request: Request, match_id: str) -> dict[str, Any]:
     return await request.app.state.store.get_json(f"gs:match:{match_id}") or {}
 
 
-@router.get("/allsportsapi/match/{match_id}")
-async def allsportsapi_match(request: Request, match_id: str) -> dict[str, Any]:
-    return await request.app.state.store.get_json(f"asa:match:{match_id}") or {}
+@router.get("/ggscore/match/{match_id}")
+async def ggscore_match(request: Request, match_id: str) -> dict[str, Any]:
+    return await request.app.state.store.get_json(f"ggs:match:{match_id}") or {}
 
 
 @router.post("/simulation/start")
@@ -605,6 +606,8 @@ async def _match_cards(
     for pm in values:
         if not pm:
             continue
+        if is_secondary_sports_market_slug(str(pm.get("slug") or "")):
+            continue
         status = str(pm.get("status") or "")
         is_finished = status.lower() in {"finished", "ended", "closed"}
         if is_finished != finished:
@@ -748,12 +751,11 @@ def _with_external_widget(
     normalized_source = str(source or row.get("source") or "").strip().lower()
     template = None
     provider_url = None
-    if normalized_source == "asa":
-        template = settings.allsports_widget_url_template
-        provider_url = "https://allsportsapi.com/widgets/football-soccer/livescore/download"
-    elif normalized_source == "gs":
+    if normalized_source == "gs":
         template = settings.goalserve_widget_url_template
         provider_url = "https://www.goalserve.com/en/sport-data-widgets/match-details-widget/details"
+    elif normalized_source == "ggs":
+        provider_url = "https://doc.ggscore.co/"
     widget_url = _format_widget_url(template, row, guid) if template else provider_url
     enriched["widget_url"] = widget_url
     enriched["widget_provider_url"] = provider_url

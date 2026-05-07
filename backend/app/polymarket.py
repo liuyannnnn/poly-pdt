@@ -339,7 +339,7 @@ def normalize_pm_gamma_event(event: dict[str, Any]) -> dict[str, Any] | None:
     if _is_closed(event) or not _is_soccer(event):
         return None
     slug = str(event.get("slug") or "")
-    if _is_more_markets_slug(slug):
+    if is_secondary_sports_market_slug(slug):
         return None
     home_team, away_team = _split_teams(str(event.get("title") or ""), slug)
     if not home_team or not away_team:
@@ -588,8 +588,13 @@ def _split_team_text(value: str) -> tuple[str, str]:
     return "", ""
 
 
-def _is_more_markets_slug(slug: str) -> bool:
-    return slug.endswith("-more-markets") or slug == "more-markets"
+def is_secondary_sports_market_slug(slug: str) -> bool:
+    """判断 PM 体育 event slug 是否是同场比赛下的子盘口，不作为独立比赛采集。"""
+
+    normalized = slug.strip().lower()
+    if normalized == "more-markets" or normalized.endswith("-more-markets"):
+        return True
+    return normalized.endswith(("-exact-score", "-correct-score"))
 
 
 def _score_pair(payload: dict[str, Any]) -> tuple[int | None, int | None]:

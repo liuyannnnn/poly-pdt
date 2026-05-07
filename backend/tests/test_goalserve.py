@@ -141,6 +141,7 @@ async def test_goalserve_ws_update_normalizes_stat_a_and_listener_persists_field
         pm_client=StaticPMHttpClient([PM_EVENTS[0]]),
         gs_client=GoalserveFixtureClient(),
     )
+    collector.set_external_source("gs")
     report = await collector.collect_once()
     guid = report["bindings"][0]["guid"]
     listener = Listener(store=store, broadcaster=BroadcastHub())

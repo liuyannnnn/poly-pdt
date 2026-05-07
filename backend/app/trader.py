@@ -432,7 +432,7 @@ class TraderManager:
             return None
         return (
             await self._store.get_json(f"gs:match:{guid}")
-            or await self._store.get_json(f"asa:match:{guid}")
+            or await self._store.get_json(f"ggs:match:{guid}")
             or await self._store.get_json(f"external:match:{guid}")
         )
 
@@ -1057,7 +1057,7 @@ def _risk_from_params(params: dict[str, Any]) -> RiskLimits:
 def _is_external_score_change_event(event: dict[str, Any] | None) -> bool:
     if not event:
         return False
-    if event.get("source") not in {"gs_live", "asa_live"}:
+    if event.get("source") not in {"gs_live", "ggs_live"}:
         return False
     changed = set(event.get("changed_fields") or [])
     return bool({"score_home", "score_away"} & changed)

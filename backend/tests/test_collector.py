@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.collector import Collector, StaticGSHttpClient, StaticPMHttpClient
+from app.collector import Collector, StaticGGSHttpClient, StaticGSHttpClient, StaticPMHttpClient
 from app.store import MemoryStore
 from app.timeseries import MATCH_RELATED_TTL_SECONDS
 
@@ -17,6 +17,7 @@ async def test_collector_matches_pm_to_gs_and_writes_isolated_redis_records():
         pm_client=StaticPMHttpClient(PM_EVENTS),
         gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
     )
+    collector.set_external_source("gs")
 
     report = await collector.collect_once()
 
@@ -120,19 +121,18 @@ async def test_collector_ignores_non_football_without_basketball_scope():
 
 
 @pytest.mark.asyncio
-async def test_collector_can_use_asa_as_independent_external_source():
+async def test_collector_can_use_ggs_as_independent_external_source():
     store = MemoryStore()
     collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(PM_EVENTS[:1]),
         gs_client=StaticGSHttpClient(home=[], d1=[]),
-        asa_client=StaticGSHttpClient(
-            home=[
+        ggs_client=StaticGGSHttpClient([
                 {
-                    "source": "asa",
-                    "match_id": "asa-100",
-                    "pregame_id": "asa-100",
-                    "inplay_id": "asa-100",
+                    "source": "ggs",
+                    "match_id": "ggs-100",
+                    "pregame_id": "ggs-100",
+                    "inplay_id": "ggs-100",
                     "league": "Premier League",
                     "home_team": "Arsenal",
                     "away_team": "Chelsea",
@@ -140,29 +140,27 @@ async def test_collector_can_use_asa_as_independent_external_source():
                     "status": "scheduled",
                     "score": {"home": 0, "away": 0},
                 }
-            ],
-            d1=[],
-        ),
+            ]),
     )
-    collector.set_external_source("asa")
+    collector.set_external_source("ggs")
 
     report = await collector.collect_once()
     guid = report["bindings"][0]["guid"]
 
-    assert report["external_source"] == "asa"
-    assert report["asa_seen"] == 1
+    assert report["external_source"] == "ggs"
+    assert report["ggs_seen"] == 1
     assert await store.get_json(f"gs:match:{guid}") is None
-    asa_match = await store.get_json(f"asa:match:{guid}")
-    assert asa_match["asa_match_id"] == "asa-100"
-    assert asa_match["source"] == "asa"
-    assert await store.get_text("idx:asa:id:asa-100") == guid
+    ggs_match = await store.get_json(f"ggs:match:{guid}")
+    assert ggs_match["ggs_match_id"] == "ggs-100"
+    assert ggs_match["source"] == "ggs"
+    assert await store.get_text("idx:ggs:id:ggs-100") == guid
     binding = await store.get_json(f"binding:{guid}")
-    assert binding["external_source"] == "asa"
-    assert binding["asa_match_id"] == "asa-100"
+    assert binding["external_source"] == "ggs"
+    assert binding["ggs_match_id"] == "ggs-100"
 
 
 @pytest.mark.asyncio
-async def test_collector_matches_asa_when_league_alias_differs_but_teams_and_time_match():
+async def test_collector_matches_ggs_when_league_alias_differs_but_teams_and_time_match():
     store = MemoryStore()
     pm_payload = [
         {
@@ -176,9 +174,9 @@ async def test_collector_matches_asa_when_league_alias_differs_but_teams_and_tim
             "volume": {"moneyline": 1_000_000, "total": 1_000_000},
         }
     ]
-    asa_payload = [
+    ggs_payload = [
         {
-            "source": "asa",
+            "source": "ggs",
             "match_id": "1608716",
             "pregame_id": "1608716",
             "inplay_id": "1608716",
@@ -193,9 +191,9 @@ async def test_collector_matches_asa_when_league_alias_differs_but_teams_and_tim
     collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(pm_payload),
-        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+        ggs_client=StaticGGSHttpClient(ggs_payload),
     )
-    collector.set_external_source("asa")
+    collector.set_external_source("ggs")
 
     report = await collector.collect_once()
     guid = report["bindings"][0]["guid"]
@@ -203,13 +201,13 @@ async def test_collector_matches_asa_when_league_alias_differs_but_teams_and_tim
     assert report["matched"] == 1
     assert report["pending"] == 0
     binding = await store.get_json(f"binding:{guid}")
-    assert binding["external_source"] == "asa"
-    assert binding["asa_match_id"] == "1608716"
+    assert binding["external_source"] == "ggs"
+    assert binding["ggs_match_id"] == "1608716"
     assert binding["confidence"] >= 0.86
 
 
 @pytest.mark.asyncio
-async def test_collector_matches_asa_short_names_to_pm_official_team_names():
+async def test_collector_matches_ggs_short_names_to_pm_official_team_names():
     store = MemoryStore()
     pm_payload = [
         {
@@ -223,9 +221,9 @@ async def test_collector_matches_asa_short_names_to_pm_official_team_names():
             "volume": {"moneyline": 1_000_000, "total": 1_000_000},
         }
     ]
-    asa_payload = [
+    ggs_payload = [
         {
-            "source": "asa",
+            "source": "ggs",
             "match_id": "1616912",
             "pregame_id": "1616912",
             "inplay_id": "1616912",
@@ -240,17 +238,17 @@ async def test_collector_matches_asa_short_names_to_pm_official_team_names():
     collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(pm_payload),
-        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+        ggs_client=StaticGGSHttpClient(ggs_payload),
     )
-    collector.set_external_source("asa")
+    collector.set_external_source("ggs")
 
     report = await collector.collect_once()
     guid = report["bindings"][0]["guid"]
 
     assert report["matched"] == 1
     binding = await store.get_json(f"binding:{guid}")
-    assert binding["external_source"] == "asa"
-    assert binding["asa_match_id"] == "1616912"
+    assert binding["external_source"] == "ggs"
+    assert binding["ggs_match_id"] == "1616912"
     assert binding["confidence"] == 1.0
 
 
@@ -269,12 +267,12 @@ async def test_collector_matches_psg_alias_to_paris_saint_germain():
             "volume": {"moneyline": 1_000_000, "total": 1_000_000},
         }
     ]
-    asa_payload = [
+    ggs_payload = [
         {
-            "source": "asa",
-            "match_id": "asa-psg",
-            "pregame_id": "asa-psg",
-            "inplay_id": "asa-psg",
+            "source": "ggs",
+            "match_id": "ggs-psg",
+            "pregame_id": "ggs-psg",
+            "inplay_id": "ggs-psg",
             "league": "UEFA Champions League",
             "home_team": "Bayern Munich",
             "away_team": "PSG",
@@ -286,15 +284,15 @@ async def test_collector_matches_psg_alias_to_paris_saint_germain():
     collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(pm_payload),
-        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+        ggs_client=StaticGGSHttpClient(ggs_payload),
     )
-    collector.set_external_source("asa")
+    collector.set_external_source("ggs")
 
     report = await collector.collect_once()
 
     assert report["matched"] == 1
     binding = await store.get_json(f"binding:{report['bindings'][0]['guid']}")
-    assert binding["asa_match_id"] == "asa-psg"
+    assert binding["ggs_match_id"] == "ggs-psg"
     assert binding["confidence"] == 1.0
 
 
@@ -313,9 +311,9 @@ async def test_collector_retries_cached_unbound_pm_matches_when_pm_no_longer_ret
             "volume": {"moneyline": 1_000_000, "total": 1_000_000},
         }
     ]
-    asa_payload = [
+    ggs_payload = [
         {
-            "source": "asa",
+            "source": "ggs",
             "match_id": "1608716",
             "pregame_id": "1608716",
             "inplay_id": "1608716",
@@ -330,28 +328,28 @@ async def test_collector_retries_cached_unbound_pm_matches_when_pm_no_longer_ret
     first_collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(pm_payload),
-        asa_client=StaticGSHttpClient(home=[], d1=[]),
+        ggs_client=StaticGGSHttpClient([]),
         now=lambda: "2026-05-03T00:00:00Z",
     )
-    first_collector.set_external_source("asa")
+    first_collector.set_external_source("ggs")
     first_report = await first_collector.collect_once()
     guid = first_report["pending_bindings"][0]["guid"]
 
     second_collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient([]),
-        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+        ggs_client=StaticGGSHttpClient(ggs_payload),
         now=lambda: "2026-05-03T00:05:00Z",
     )
-    second_collector.set_external_source("asa")
+    second_collector.set_external_source("ggs")
     second_report = await second_collector.collect_once()
 
     assert second_report["pm_seen"] == 1
     assert second_report["matched"] == 1
     binding = await store.get_json(f"binding:{guid}")
     assert binding["status"] == "matched"
-    assert binding["asa_match_id"] == "1608716"
-    assert await store.get_text("idx:asa:id:1608716") == guid
+    assert binding["ggs_match_id"] == "1608716"
+    assert await store.get_text("idx:ggs:id:1608716") == guid
 
 
 @pytest.mark.asyncio
@@ -369,10 +367,10 @@ async def test_collector_lists_external_candidates_by_time_and_team_without_leag
             "volume": {"moneyline": 900000, "total": 900000},
         }
     ]
-    asa_payload = [
+    ggs_payload = [
         {
-            "source": "asa",
-            "match_id": "asa-close",
+            "source": "ggs",
+            "match_id": "ggs-close",
             "league": "Primera",
             "home_team": "Celta",
             "away_team": "Elche CF",
@@ -381,8 +379,8 @@ async def test_collector_lists_external_candidates_by_time_and_team_without_leag
             "score": {"home": 1, "away": 0},
         },
         {
-            "source": "asa",
-            "match_id": "asa-other",
+            "source": "ggs",
+            "match_id": "ggs-other",
             "league": "Premier League",
             "home_team": "Arsenal",
             "away_team": "Chelsea",
@@ -393,15 +391,15 @@ async def test_collector_lists_external_candidates_by_time_and_team_without_leag
     collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(pm_payload),
-        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+        ggs_client=StaticGGSHttpClient(ggs_payload),
     )
-    collector.set_external_source("asa")
+    collector.set_external_source("ggs")
     report = await collector.collect_once()
     guid = report["pending_bindings"][0]["guid"]
 
-    candidates = await collector.external_candidates_for_match(guid, source="asa", limit=5)
+    candidates = await collector.external_candidates_for_match(guid, source="ggs", limit=5)
 
-    assert [row["external_match_id"] for row in candidates][:2] == ["asa-close", "asa-other"]
+    assert [row["external_match_id"] for row in candidates][:2] == ["ggs-close", "ggs-other"]
     assert candidates[0]["confidence"] > candidates[1]["confidence"]
     assert candidates[0]["league"] == "Primera"
 
@@ -421,10 +419,10 @@ async def test_collector_manual_external_binding_writes_current_state_and_indice
             "volume": {"moneyline": 900000, "total": 900000},
         }
     ]
-    asa_payload = [
+    ggs_payload = [
         {
-            "source": "asa",
-            "match_id": "asa-close",
+            "source": "ggs",
+            "match_id": "ggs-close",
             "league": "Primera",
             "home_team": "Celta",
             "away_team": "Elche CF",
@@ -436,19 +434,19 @@ async def test_collector_manual_external_binding_writes_current_state_and_indice
     collector = Collector(
         store=store,
         pm_client=StaticPMHttpClient(pm_payload),
-        asa_client=StaticGSHttpClient(home=[], d1=asa_payload),
+        ggs_client=StaticGGSHttpClient(ggs_payload),
     )
-    collector.set_external_source("asa")
+    collector.set_external_source("ggs")
     report = await collector.collect_once()
     guid = report["pending_bindings"][0]["guid"]
 
-    binding = await collector.bind_external_match(guid, source="asa", external_match_id="asa-close")
+    binding = await collector.bind_external_match(guid, source="ggs", external_match_id="ggs-close")
 
     assert binding["status"] == "matched"
-    assert binding["external_source"] == "asa"
-    assert binding["external_match_id"] == "asa-close"
-    assert await store.get_text("idx:asa:id:asa-close") == guid
-    assert (await store.get_json(f"asa:match:{guid}"))["score_home"] == 1
+    assert binding["external_source"] == "ggs"
+    assert binding["external_match_id"] == "ggs-close"
+    assert await store.get_text("idx:ggs:id:ggs-close") == guid
+    assert (await store.get_json(f"ggs:match:{guid}"))["score_home"] == 1
     assert await store.get_text(f"idx:match:status:pending:{guid}") is None
 
 
@@ -460,6 +458,7 @@ async def test_collector_preserves_realtime_fields_when_http_snapshot_lacks_them
         pm_client=StaticPMHttpClient(PM_EVENTS[:1]),
         gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
     )
+    collector.set_external_source("gs")
     report = await collector.collect_once()
     guid = report["bindings"][0]["guid"]
     current = await store.get_json(f"pm:match:{guid}")
@@ -612,6 +611,7 @@ async def test_collector_start_runs_continuous_loop_until_stopped():
         gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
         interval_seconds=0.01,
     )
+    collector.set_external_source("gs")
 
     await collector.start()
     try:

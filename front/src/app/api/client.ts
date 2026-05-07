@@ -1,7 +1,42 @@
 import { BackendMatchCard } from "./mappers";
 
 
-const API_BASE = "http://127.0.0.1:8000/api/v1";
+const API_PREFIX = "/api/v1";
+const DEFAULT_FRONTEND_PORT = "8088";
+
+function readViteEnv(key: string): string | undefined {
+  return (import.meta.env as Record<string, string | undefined>)[key];
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function defaultApiBase(): string {
+  return API_PREFIX;
+}
+
+function resolveApiBase(): string {
+  return trimTrailingSlash(readViteEnv("VITE_API_BASE_URL") || defaultApiBase());
+}
+
+function resolveMarketWsUrl(apiBase: string): string {
+  const configured = readViteEnv("VITE_MARKET_WS_URL");
+  if (configured) {
+    return configured;
+  }
+  if (!apiBase.startsWith("http")) {
+    if (typeof window === "undefined" || !window.location?.host) {
+      return `ws://127.0.0.1:${DEFAULT_FRONTEND_PORT}${API_PREFIX}/ws/market`;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}${API_PREFIX}/ws/market`;
+  }
+  return `${apiBase.replace(/^http/, "ws")}/ws/market`;
+}
+
+export const API_BASE = resolveApiBase();
+export const MARKET_WS_URL = resolveMarketWsUrl(API_BASE);
 
 export interface AuthSession {
   authenticated: boolean;
@@ -12,7 +47,7 @@ export interface AuthSession {
 export interface CollectorSettings {
   collection_interval_minutes: number;
   football_volume_threshold_k: number;
-  external_source: "gs" | "asa" | "none";
+  external_source: "gs" | "ggs" | "none";
 }
 
 export interface CollectorStatus {
@@ -34,13 +69,11 @@ export interface CollectorStatus {
   pm_sports_ws_connected?: boolean;
   gs_ws_enabled?: boolean;
   gs_ws_connected?: boolean;
-  asa_ws_enabled?: boolean;
-  asa_ws_connected?: boolean;
-  allsports_ws_enabled?: boolean;
-  allsports_ws_connected?: boolean;
-  allsports_last_connected_at?: string | null;
-  allsports_last_event_at?: string | null;
-  allsports_last_error?: string | null;
+  ggs_ws_enabled?: boolean;
+  ggs_ws_connected?: boolean;
+  ggs_last_connected_at?: string | null;
+  ggs_last_event_at?: string | null;
+  ggs_last_error?: string | null;
   polymarket_last_connected_at?: string | null;
   polymarket_last_event_at?: string | null;
   polymarket_last_error?: string | null;
@@ -161,7 +194,7 @@ export interface BackendMatchSnapshot {
 }
 
 export interface ExternalMatchCandidate {
-  source: "gs" | "asa";
+  source: "gs" | "ggs";
   external_match_id: string;
   league: string;
   home_team: string;
@@ -245,7 +278,7 @@ export async function fetchHistoryMatches(limit = 50, offset = 0): Promise<Backe
 
 
 export async function fetchTicks(matchId: string): Promise<Array<{ time: string; bid: number; ask: number }>> {
-  const response = await apiFetch(`${API_BASE}/ticks?match_id=${encodeURIComponent(matchId)}&limit=1000`);
+  const response = await apiFetch(`${API_BASE}/ticks?match_id=${encodeURIComponent(matchId)}`);
   if (!response.ok) {
     throw new Error(`ticks request failed: ${response.status}`);
   }
@@ -258,8 +291,16 @@ export async function fetchTicks(matchId: string): Promise<Array<{ time: string;
 }
 
 
-export async function fetchMatchSnapshots(matchId: string, limit = 1000): Promise<BackendMatchSnapshot[]> {
-  const response = await apiFetch(`${API_BASE}/matches/${encodeURIComponent(matchId)}/snapshots?limit=${limit}`);
+export async function fetchMatchSnapshots(
+  matchId: string,
+  series: "all" | "live" = "all",
+  limit?: number
+): Promise<BackendMatchSnapshot[]> {
+  const params = new URLSearchParams({ series });
+  if (limit != null) {
+    params.set("limit", String(limit));
+  }
+  const response = await apiFetch(`${API_BASE}/matches/${encodeURIComponent(matchId)}/snapshots?${params.toString()}`);
   if (!response.ok) {
     throw new Error(`match snapshots request failed: ${response.status}`);
   }
@@ -333,7 +374,7 @@ export async function fetchExternalSourceMatchDetail(matchId: string): Promise<a
 
 export async function fetchExternalMatchCandidates(
   matchId: string,
-  source?: "gs" | "asa",
+  source?: "gs" | "ggs",
   limit = 50
 ): Promise<ExternalMatchCandidate[]> {
   const response = await apiFetch(
@@ -350,7 +391,7 @@ export async function fetchExternalMatchCandidates(
 
 export async function bindExternalMatch(
   matchId: string,
-  source: "gs" | "asa",
+  source: "gs" | "ggs",
   externalMatchId: string
 ): Promise<any> {
   const response = await apiFetch(`${API_BASE}/matches/${encodeURIComponent(matchId)}/external-bind`, {

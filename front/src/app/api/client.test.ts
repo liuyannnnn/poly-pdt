@@ -38,7 +38,7 @@ describe("auth client", () => {
     await loginWithPassword("pw-0501");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/v1/auth/login",
+      "/api/v1/auth/login",
       expect.objectContaining({
         method: "POST",
         credentials: "include",
@@ -55,9 +55,9 @@ describe("auth client", () => {
     await checkAuthSession();
     await fetchMatches();
 
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8000/api/v1/auth/session");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/auth/session");
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "include" });
-    expect(fetchMock.mock.calls[1][0]).toBe("http://127.0.0.1:8000/api/v1/matches");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/matches");
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: "include" });
   });
 });
@@ -70,7 +70,7 @@ describe("fetchTrades", () => {
 
     await fetchTrades({ matchId: "match-a", limit: 50 });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://127.0.0.1:8088");
     expect(calledUrl.pathname).toBe("/api/v1/trades");
     expect(calledUrl.searchParams.get("match_id")).toBe("match-a");
     expect(calledUrl.searchParams.get("limit")).toBe("50");
@@ -85,7 +85,7 @@ describe("fetchLogs", () => {
 
     await fetchLogs({ matchId: "match-a", limit: 20 });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://127.0.0.1:8088");
     expect(calledUrl.pathname).toBe("/api/v1/logs");
     expect(calledUrl.searchParams.get("match_id")).toBe("match-a");
     expect(calledUrl.searchParams.get("limit")).toBe("20");
@@ -104,7 +104,7 @@ describe("updateTradingInstance", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8000/api/v1/tradings/S001");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/tradings/S001");
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -124,10 +124,11 @@ describe("fetchMatchSnapshots", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockJsonResponse([]));
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchMatchSnapshots("258884", 150);
+    await fetchMatchSnapshots("258884", "live", 150);
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://127.0.0.1:8088");
     expect(calledUrl.pathname).toBe("/api/v1/matches/258884/snapshots");
+    expect(calledUrl.searchParams.get("series")).toBe("live");
     expect(calledUrl.searchParams.get("limit")).toBe("150");
   });
 });
@@ -153,7 +154,7 @@ describe("fetchCollectorStatus", () => {
     await fetchCollectorStatus();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8000/api/v1/collector/status");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/collector/status");
   });
 });
 
@@ -180,7 +181,7 @@ describe("fetchPmAccounts", () => {
     const rows = await fetchPmAccounts();
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8000/api/v1/pm/accounts");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/pm/accounts");
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "include" });
     expect(rows[0].id).toBe("pm-main");
   });
@@ -199,7 +200,7 @@ describe("saveCollectorSettings", () => {
     await saveCollectorSettings(payload);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://127.0.0.1:8000/api/v1/settings/collector");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/settings/collector");
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -215,7 +216,7 @@ describe("fetchHistoryMatches", () => {
 
     await fetchHistoryMatches(120, 50);
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    const calledUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://127.0.0.1:8088");
     expect(calledUrl.pathname).toBe("/api/v1/matches/history");
     expect(calledUrl.searchParams.get("limit")).toBe("120");
     expect(calledUrl.searchParams.get("offset")).toBe("50");
@@ -227,18 +228,18 @@ describe("manual external match binding", () => {
     const fetchMock = vi.fn().mockResolvedValue(mockJsonResponse([]));
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchExternalMatchCandidates("guid-1", "asa", 25);
-    await bindExternalMatch("guid-1", "asa", "1608714");
+    await fetchExternalMatchCandidates("guid-1", "ggs", 25);
+    await bindExternalMatch("guid-1", "ggs", "1608714");
 
-    const candidateUrl = new URL(fetchMock.mock.calls[0][0] as string);
+    const candidateUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://127.0.0.1:8088");
     expect(candidateUrl.pathname).toBe("/api/v1/matches/guid-1/external-candidates");
-    expect(candidateUrl.searchParams.get("source")).toBe("asa");
+    expect(candidateUrl.searchParams.get("source")).toBe("ggs");
     expect(candidateUrl.searchParams.get("limit")).toBe("25");
-    expect(fetchMock.mock.calls[1][0]).toBe("http://127.0.0.1:8000/api/v1/matches/guid-1/external-bind");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/matches/guid-1/external-bind");
     expect(fetchMock.mock.calls[1][1]).toMatchObject({
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: "asa", external_match_id: "1608714" }),
+      body: JSON.stringify({ source: "ggs", external_match_id: "1608714" }),
     });
   });
 });

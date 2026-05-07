@@ -22,10 +22,8 @@ const DEFAULT_STATUS: CollectorStatus = {
   pm_sports_ws_connected: false,
   gs_ws_enabled: false,
   gs_ws_connected: false,
-  asa_ws_enabled: false,
-  asa_ws_connected: false,
-  allsports_ws_enabled: false,
-  allsports_ws_connected: false,
+  ggs_ws_enabled: false,
+  ggs_ws_connected: false,
   goalserve_connected: false,
   matches_count: 0,
   last_tick_source: null,
@@ -53,8 +51,7 @@ export const Header = () => {
             pm_user_ws_connected: false,
             pm_sports_ws_connected: false,
             gs_ws_connected: false,
-            asa_ws_connected: false,
-            allsports_ws_connected: false,
+            ggs_ws_connected: false,
           }));
         }
       }
@@ -89,8 +86,8 @@ export const Header = () => {
       connected: Boolean(status.gs_ws_connected ?? status.goalserve_connected),
     },
     {
-      label: "ASA-WS",
-      connected: Boolean(status.asa_ws_connected ?? status.allsports_ws_connected),
+      label: "GGS-WS",
+      connected: Boolean(status.ggs_ws_connected),
     },
   ];
 

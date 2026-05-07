@@ -7,7 +7,7 @@
 - Python。
 - Redis。
 - PM as base。
-- GS/ASA as outsource。
+- GS/GGS as outsource。
 - Football only。
 - Existing frontend layout unchanged。
 - Frontend source comes from `pdt2.1/frontend-snapshot/`。
@@ -41,10 +41,10 @@
 
 - PM HTTP 采集。
 - GS `home` / `d1` HTTP 采集。
-- ASA HTTP 采集或查询近期足球比赛。
-- 以 PM 为基准匹配 GS/ASA。
+- GGS HTTP 采集或查询近期足球比赛。
+- 以 PM 为基准匹配 GS/GGS。
 - 生成 `guid`。
-- 存 PM 当前态、GS/ASA 当前态、binding。
+- 存 PM 当前态、GS/GGS 当前态、binding。
 - 设置比赛相关 TTL 3 天。
 
 禁止：
@@ -62,13 +62,13 @@
 - PM market WS。
 - PM user WS。
 - GS live WS。
-- ASA live WS。
+- GGS live WS。
 - 过滤非系统当前比赛。
 - 标准化实时字段。
 - 入 Redis。
 - 推送前端。
 - PM market ticks 推送交易模块行情通道。
-- PM sports/GS/ASA 比赛数据推送判别器。
+- PM sports/GS/GGS 比赛数据推送判别器。
 - PM user 账号、订单、成交事件按 `provider + account_alias` 推送对应交易员。
 
 禁止：
@@ -100,8 +100,8 @@
 
 禁止：
 
-- 不接 PM/GS/ASA HTTP。
-- 不接 PM/GS/ASA WS。
+- 不接 PM/GS/GGS HTTP。
+- 不接 PM/GS/GGS WS。
 - 不修改前端布局。
 
 ### Discriminator Component
@@ -110,7 +110,7 @@
 
 只负责：
 
-- 接收 PM sports、GS、ASA 的比赛数据。
+- 接收 PM sports、GS、GGS 的比赛数据。
 - 记录每个 `source + guid` 的最新比赛值。
 - 对比分、点球、红黄牌等字段做简单变化检测。
 - 只把比赛变化信号推送给交易模块。
@@ -129,8 +129,8 @@
 - 先让主链路跑通。
 - 组件边界清楚，但不要过度分层。
 - 所有 I/O 用 async。
-- PM 数据和 GS/ASA 数据逻辑独立、存储独立。
-- 必须通过 `guid` 建立 PM/GS/ASA 唯一匹配索引。
+- PM 数据和 GS/GGS 数据逻辑独立、存储独立。
+- 必须通过 `guid` 建立 PM/GS/GGS 唯一匹配索引。
 - 不能为了前端显示编造数据。
 - Strategy 只能调用 Trader API。
 - Trader 是唯一处理买入、卖出、账户、持仓、订单、成交的模块。
@@ -148,7 +148,7 @@
 
 - raw payload 原样保存。
 - 标准化字段单独保存。
-- PM 字段和 GS/ASA 字段互不覆盖。
+- PM 字段和 GS/GGS 字段互不覆盖。
 - 凭证只放 `.env`，不进 Redis、不进日志、不进 fixture。
 
 ## 三轮开发顺序
@@ -164,8 +164,8 @@
 
 ### 第二轮：模块开发
 
-- Collector：PM/GS/ASA HTTP + guid 匹配。
-- Listener：PM/GS/ASA WS + 标准化 + 入库 + 推送。
+- Collector：PM/GS/GGS HTTP + guid 匹配。
+- Listener：PM/GS/GGS WS + 标准化 + 入库 + 推送。
 - Discriminator：比赛数据变化检测 + match signal。
 - Trader：交易模块 + 交易员 + 策略 API + 约束检查 + simulation + real dry-run + 默认策略。
 

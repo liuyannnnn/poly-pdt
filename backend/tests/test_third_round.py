@@ -23,6 +23,7 @@ def build_fixture_stack():
         pm_client=StaticPMHttpClient(PM_EVENTS[:1]),
         gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
     )
+    collector.set_external_source("gs")
     listener = Listener(store=store, broadcaster=hub, trader_manager=trader)
     return store, hub, trader, collector, listener
 

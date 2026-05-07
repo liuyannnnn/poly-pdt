@@ -461,7 +461,7 @@ async def test_default_strategy_detects_score_delay_and_respects_time_and_price_
     )
     api = manager.api(trading.trading_id)
 
-    intents = await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 0, 0, 1, 0))
+    intents = await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 0, 0, 1, 0))
     assert intents == [
         {
             "action": "buy",
@@ -476,7 +476,7 @@ async def test_default_strategy_detects_score_delay_and_respects_time_and_price_
         "gs:match:guid-1",
         {"guid": "guid-1", "score_home": 1, "score_away": 0, "clock": "85:01"},
     )
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 0, 0, 1, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 0, 0, 1, 0)) == [
         {
             "action": "buy",
             "guid": "guid-1",
@@ -493,7 +493,7 @@ async def test_default_strategy_detects_score_delay_and_respects_time_and_price_
     pm = await store.get_json("pm:match:guid-1")
     pm["home_ask1"] = 0.94
     await store.set_json("pm:match:guid-1", pm)
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 0, 0, 1, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 0, 0, 1, 0)) == [
         {
             "action": "log",
             "guid": "guid-1",
@@ -520,7 +520,7 @@ async def test_default_strategy_reverses_opposite_position():
     intents = await football_score_delay_trade(
         manager.api(trading.trading_id),
         "guid-1",
-        _asa_score_event("guid-1", 0, 0, 1, 0),
+        _ggs_score_event("guid-1", 0, 0, 1, 0),
     )
 
     assert intents[0]["action"] == "sell"
@@ -551,12 +551,12 @@ async def test_score_delay_strategy_requires_external_score_change_before_pm_sco
     api = manager.api(trading.trading_id)
 
     assert await football_score_delay_trade(api, "guid-1", {"source": "pm_sports", "changed_fields": ["score_home"]}) == []
-    assert await football_score_delay_trade(api, "guid-1", {"source": "asa_live", "changed_fields": ["clock"]}) == []
+    assert await football_score_delay_trade(api, "guid-1", {"source": "ggs_live", "changed_fields": ["clock"]}) == []
 
     pm = await store.get_json("pm:match:guid-1")
     pm["score_home"] = 1
     await store.set_json("pm:match:guid-1", pm)
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 0, 0, 1, 0)) == []
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 0, 0, 1, 0)) == []
 
 
 @pytest.mark.asyncio
@@ -580,7 +580,7 @@ async def test_score_delay_strategy_buys_draw_when_external_equalizes_before_pm(
     assert await football_score_delay_trade(
         manager.api(trading.trading_id),
         "guid-1",
-        _asa_score_event("guid-1", 1, 0, 1, 1),
+        _ggs_score_event("guid-1", 1, 0, 1, 1),
     ) == [
         {
             "action": "buy",
@@ -611,7 +611,7 @@ async def test_score_delay_strategy_uses_pm_score_snapshot_from_external_event_w
     )
 
     event = {
-        **_asa_score_event("guid-1", 1, 0, 1, 1),
+        **_ggs_score_event("guid-1", 1, 0, 1, 1),
         "pm_score_home_at_event": 1,
         "pm_score_away_at_event": 0,
     }
@@ -648,7 +648,7 @@ async def test_score_delay_strategy_logs_when_trailing_team_scores_but_no_rule_t
     assert await football_score_delay_trade(
         manager.api(trading.trading_id),
         "guid-1",
-        _asa_score_event("guid-1", 0, 3, 1, 3),
+        _ggs_score_event("guid-1", 0, 3, 1, 3),
     ) == [
         {
             "action": "log",
@@ -673,9 +673,9 @@ async def test_score_delay_strategy_does_not_repeat_buy_on_clock_or_pm_events():
     )
     await manager.start_trading(trading.trading_id)
 
-    manager.enqueue_event(_asa_score_event("guid-1", 0, 0, 1, 0))
+    manager.enqueue_event(_ggs_score_event("guid-1", 0, 0, 1, 0))
     assert await manager.process_queued_events() == {"processed": 1, "trades": 1, "failures": 0}
-    manager.enqueue_event({"guid": "guid-1", "source": "asa_live", "changed_fields": ["clock"]})
+    manager.enqueue_event({"guid": "guid-1", "source": "ggs_live", "changed_fields": ["clock"]})
     manager.enqueue_event({"guid": "guid-1", "source": "pm_sports", "changed_fields": ["match_time"]})
     assert await manager.process_queued_events() == {"processed": 2, "trades": 0, "failures": 0}
     assert len(manager.get_trades(trading.trading_id)) == 1
@@ -696,8 +696,8 @@ async def test_market_ticks_use_separate_channel_and_do_not_enter_strategy_queue
     )
     await manager.start_trading(trading.trading_id)
 
-    manager.on_match_signal(_asa_score_event("guid-1", 0, 0, 1, 0))
-    manager.on_match_signal(_asa_score_event("guid-1", 1, 0, 2, 0))
+    manager.on_match_signal(_ggs_score_event("guid-1", 0, 0, 1, 0))
+    manager.on_match_signal(_ggs_score_event("guid-1", 1, 0, 2, 0))
     await manager.on_market_tick(
         {
             "source": "pm_market",
@@ -966,7 +966,7 @@ async def test_score_delay_strategy_adds_only_when_leader_scores_again_under_pri
     api = manager.api(trading.trading_id)
     await api.buy("guid-1", "home", 100)
 
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 1, 0, 1, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 1, 0, 1, 0)) == [
         {
             "action": "log",
             "guid": "guid-1",
@@ -975,7 +975,7 @@ async def test_score_delay_strategy_adds_only_when_leader_scores_again_under_pri
     ]
 
     await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 2, "score_away": 0, "clock": "35:00"})
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 1, 0, 2, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 1, 0, 2, 0)) == [
         {
             "action": "buy",
             "guid": "guid-1",
@@ -989,7 +989,7 @@ async def test_score_delay_strategy_adds_only_when_leader_scores_again_under_pri
     pm["home_ask1"] = 0.94
     await store.set_json("pm:match:guid-1", pm)
     await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 3, "score_away": 0, "clock": "36:00"})
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 2, 0, 3, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 2, 0, 3, 0)) == [
         {
             "action": "log",
             "guid": "guid-1",
@@ -1022,7 +1022,7 @@ async def test_score_delay_strategy_uses_common_risk_budgets_and_halves_after_85
     )
     api = manager.api(trading.trading_id)
 
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 0, 0, 1, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 0, 0, 1, 0)) == [
         {
             "action": "buy",
             "guid": "guid-1",
@@ -1034,7 +1034,7 @@ async def test_score_delay_strategy_uses_common_risk_budgets_and_halves_after_85
 
     await api.buy("guid-1", "home", 2000)
     await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 2, "score_away": 0, "clock": "86:00"})
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 1, 0, 2, 0)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 1, 0, 2, 0)) == [
         {
             "action": "buy",
             "guid": "guid-1",
@@ -1067,7 +1067,7 @@ async def test_score_delay_strategy_sells_when_two_goal_lead_shrinks_to_one_with
     await store.set_json("pm:match:guid-1", pm)
     await store.set_json("gs:match:guid-1", {"guid": "guid-1", "score_home": 3, "score_away": 2, "clock": "72:00"})
 
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 3, 1, 3, 2)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 3, 1, 3, 2)) == [
         {
             "action": "sell",
             "guid": "guid-1",
@@ -1098,7 +1098,7 @@ async def test_score_delay_protective_exit_runs_when_pm_already_has_previous_sco
     api = manager.api(trading.trading_id)
     buy = await api.buy("guid-1", "home", 1000)
 
-    assert await football_score_delay_trade(api, "guid-1", _asa_score_event("guid-1", 3, 1, 3, 2)) == [
+    assert await football_score_delay_trade(api, "guid-1", _ggs_score_event("guid-1", 3, 1, 3, 2)) == [
         {
             "action": "sell",
             "guid": "guid-1",
@@ -1280,7 +1280,7 @@ async def test_common_drawdown_uses_absolute_price_drop_from_peak_not_percent():
     api = manager.api(trading.trading_id)
     await api.buy("guid-1", "home", 100)
 
-    assert await football_score_delay_trade(api, "guid-1", {"source": "asa_live", "changed_fields": ["clock"]}) == []
+    assert await football_score_delay_trade(api, "guid-1", {"source": "ggs_live", "changed_fields": ["clock"]}) == []
 
     pm["home_ask1"] = 0.55
     pm["home_bid1"] = 0.54
@@ -1550,7 +1550,7 @@ async def test_trader_background_processing_is_isolated_per_trader():
     await slow_manager.start_trading(fast.trading_id)
 
     try:
-        slow_manager.on_match_signal(_asa_score_event("guid-1", 0, 0, 1, 0))
+        slow_manager.on_match_signal(_ggs_score_event("guid-1", 0, 0, 1, 0))
         await asyncio.wait_for(blocking_clob.started.wait(), timeout=0.2)
 
         async def fast_traded() -> bool:
@@ -1582,7 +1582,7 @@ async def test_trader_background_loop_wakes_immediately_when_event_is_enqueued()
     await manager.start()
     try:
         await asyncio.sleep(0.02)
-        manager.enqueue_event(_asa_score_event("guid-1", 0, 0, 1, 0))
+        manager.enqueue_event(_ggs_score_event("guid-1", 0, 0, 1, 0))
         await _wait_until(lambda: len(manager.get_trades(trading.trading_id)) == 1, timeout_seconds=0.3)
     finally:
         await manager.stop()
@@ -1603,8 +1603,8 @@ async def test_trader_preserves_multiple_score_events_for_same_match():
     )
     await manager.start_trading(trading.trading_id)
 
-    manager.enqueue_event(_asa_score_event("guid-1", 0, 0, 1, 0))
-    manager.enqueue_event(_asa_score_event("guid-1", 1, 0, 2, 0))
+    manager.enqueue_event(_ggs_score_event("guid-1", 0, 0, 1, 0))
+    manager.enqueue_event(_ggs_score_event("guid-1", 1, 0, 2, 0))
 
     assert manager.queue_size(trading.trading_id) == 2
 
@@ -1643,7 +1643,7 @@ async def _wait_until(predicate, timeout_seconds: float = 0.5) -> None:
     raise AssertionError("condition was not met before timeout")
 
 
-def _asa_score_event(
+def _ggs_score_event(
     guid: str,
     previous_home: int,
     previous_away: int,
@@ -1652,7 +1652,7 @@ def _asa_score_event(
 ) -> dict[str, object]:
     return {
         "guid": guid,
-        "source": "asa_live",
+        "source": "ggs_live",
         "changed_fields": ["score_home", "score_away"],
         "previous_score_home": previous_home,
         "previous_score_away": previous_away,

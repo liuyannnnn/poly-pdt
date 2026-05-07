@@ -176,6 +176,30 @@ def test_pm_gamma_parser_maps_binary_moneyline_markets_to_three_outcomes():
     assert row["market"]["prices"]["away"] == {"bid": 0.1, "ask": 0.11}
 
 
+def test_pm_gamma_parser_ignores_exact_score_submarket_slug():
+    from app.polymarket import normalize_pm_gamma_event
+
+    event = {
+        **PM_GAMMA_EVENTS[0],
+        "id": "pm-exact-score",
+        "slug": "ucl-bay-psg-2026-05-06-exact-score",
+        "title": "FC Bayern München vs Paris Saint-Germain FC Exact Score",
+        "markets": [
+            {
+                "id": "exact-score-market",
+                "conditionId": "cond-exact",
+                "question": "FC Bayern München vs Paris Saint-Germain FC exact score",
+                "outcomes": '["0-0","1-0","0-1","Any Other Score"]',
+                "clobTokenIds": '["asset-00","asset-10","asset-01","asset-other"]',
+                "outcomePrices": '["0.08","0.12","0.1","0.7"]',
+                "volume": 20000,
+            }
+        ],
+    }
+
+    assert normalize_pm_gamma_event(event) is None
+
+
 @pytest.mark.asyncio
 async def test_pm_gamma_http_client_uses_series_title_without_leaking_raw_json():
     payload = [

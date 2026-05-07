@@ -9,7 +9,7 @@ import { checkAuthSession } from "./api/client";
 import { useTrading } from "./context/TradingContext";
 
 const SOURCE_LABELS = {
-  asa: "AllSportsAPI",
+  ggs: "GGS",
   gs: "Goalserve",
   none: "未绑定",
 } as const;

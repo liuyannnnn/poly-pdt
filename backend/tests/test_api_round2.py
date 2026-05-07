@@ -9,13 +9,15 @@ from .fixtures import GS_D1, GS_HOME, PM_EVENTS
 
 def test_api_returns_collected_matches_and_trader_state():
     store = MemoryStore()
+    collector = Collector(
+        store=store,
+        pm_client=StaticPMHttpClient(PM_EVENTS[:1]),
+        gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
+    )
+    collector.set_external_source("gs")
     app = create_app(
         store=store,
-        collector=Collector(
-            store=store,
-            pm_client=StaticPMHttpClient(PM_EVENTS[:1]),
-            gs_client=StaticGSHttpClient(home=GS_HOME, d1=GS_D1),
-        ),
+        collector=collector,
     )
 
     with TestClient(app) as client:

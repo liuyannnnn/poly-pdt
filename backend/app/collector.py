@@ -30,6 +30,20 @@ class GSClient(Protocol):
     async def fetch_d1(self) -> list[dict[str, Any]]: ...
 
 
+class GGSClient(Protocol):
+    async def fetch_match_list(
+        self,
+        *,
+        match_id: str | None = None,
+        start_time_from: int | None = None,
+        start_time_to: int | None = None,
+        sport_id: str = "202",
+        language: str = "en",
+        per_page: int = 100,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]: ...
+
+
 class StaticPMHttpClient:
     def __init__(self, events: list[dict[str, Any]] | None = None):
         self._events = events or []
@@ -54,6 +68,27 @@ class StaticGSHttpClient:
         return list(self._d1)
 
 
+class StaticGGSHttpClient:
+    def __init__(self, matches: list[dict[str, Any]] | None = None):
+        self._matches = matches or []
+
+    async def fetch_match_list(
+        self,
+        *,
+        match_id: str | None = None,
+        start_time_from: int | None = None,
+        start_time_to: int | None = None,
+        sport_id: str = "202",
+        language: str = "en",
+        per_page: int = 100,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        rows = list(self._matches)
+        if match_id:
+            rows = [row for row in rows if str(row.get("match_id") or row.get("external_match_id")) == str(match_id)]
+        return rows
+
+
 @dataclass(frozen=True)
 class MatchCandidate:
     gs: dict[str, Any]
@@ -67,7 +102,7 @@ class Collector:
         store: Any | None = None,
         pm_client: PMClient | None = None,
         gs_client: GSClient | None = None,
-        asa_client: GSClient | None = None,
+        ggs_client: GGSClient | None = None,
         broadcaster: Any | None = None,
         trader_manager: Any | None = None,
         interval_seconds: float = 5 * 60,
@@ -77,7 +112,7 @@ class Collector:
         self._store = store
         self._pm_client = pm_client or StaticPMHttpClient()
         self._gs_client = gs_client or StaticGSHttpClient()
-        self._asa_client = asa_client or StaticGSHttpClient()
+        self._ggs_client = ggs_client or StaticGGSHttpClient()
         self._broadcaster = broadcaster
         self._trader_manager = trader_manager
         self._now = now or (lambda: datetime.now(UTC))
@@ -92,7 +127,7 @@ class Collector:
         self._next_run_at: str | None = None
         self._football_volume_threshold_k = 0
         self._upcoming_days: int | None = None
-        self._external_source = "gs"
+        self._external_source = "ggs"
 
     async def start(self) -> None:
         if self._running:
@@ -123,7 +158,7 @@ class Collector:
         self._upcoming_days = None if upcoming_days is None else max(1, int(upcoming_days))
 
     def set_external_source(self, source: str) -> None:
-        self._external_source = source if source in {"gs", "asa", "none"} else "none"
+        self._external_source = source if source in {"gs", "ggs", "none"} else "none"
 
     def _lock(self) -> asyncio.Lock:
         if self._collect_lock is None:
@@ -151,17 +186,18 @@ class Collector:
             completed_at = _format_utc(now_dt)
             raw_pm = [row for row in await self._pm_client.fetch_events() if _sport(row) == "football"]
             raw_gs: list[dict[str, Any]] = []
-            raw_asa: list[dict[str, Any]] = []
+            raw_ggs: list[dict[str, Any]] = []
             if self._external_source == "gs":
                 raw_gs = [
                     *[row for row in await self._gs_client.fetch_home() if _sport(row) == "football"],
                     *[row for row in await self._gs_client.fetch_d1() if _sport(row) == "football"],
                 ]
-            elif self._external_source == "asa":
-                raw_asa = [
-                    *[row for row in await self._asa_client.fetch_home() if _sport(row) == "football"],
-                    *[row for row in await self._asa_client.fetch_d1() if _sport(row) == "football"],
-                ]
+            elif self._external_source == "ggs":
+                start_ts, end_ts = self._ggs_time_window(now_dt)
+                raw_ggs = await self._ggs_client.fetch_match_list(
+                    start_time_from=start_ts,
+                    start_time_to=end_ts,
+                )
             pm_matches = [
                 pm
                 for pm in (_parse_pm_match(row, completed_at) for row in raw_pm)
@@ -173,8 +209,14 @@ class Collector:
                     pm_matches.append(cached_pm)
                     seen_pm_event_ids.add(cached_pm["pm_event_id"])
             gs_matches = [_parse_gs_match(row, completed_at) for row in raw_gs]
-            asa_matches = [_parse_asa_match(row, completed_at) for row in raw_asa]
-            external_matches = gs_matches if self._external_source == "gs" else asa_matches
+            ggs_matches = [_parse_ggs_match(row, completed_at) for row in raw_ggs]
+            external_matches = (
+                gs_matches
+                if self._external_source == "gs"
+                else ggs_matches
+                if self._external_source == "ggs"
+                else []
+            )
 
             bindings: list[dict[str, Any]] = []
             pending_bindings: list[dict[str, Any]] = []
@@ -194,10 +236,10 @@ class Collector:
                     gs = dict(candidate.gs, guid=guid)
                     used_external_ids.add(_external_match_id(gs))
                     binding = _binding(guid, pm, gs, candidate.confidence, "matched", completed_at)
-                    if gs.get("source") == "asa":
-                        await self._write_asa(guid, gs)
-                        await self._write_asa_indices(guid, gs)
-                    else:
+                    if gs.get("source") == "ggs":
+                        await self._write_ggs(guid, gs)
+                        await self._write_ggs_indices(guid, gs)
+                    elif gs.get("source") == "gs":
                         await self._write_gs(guid, gs)
                         await self._write_gs_indices(guid, gs)
                     bindings.append(binding)
@@ -212,7 +254,7 @@ class Collector:
                 "external_source": self._external_source,
                 "pm_seen": len(pm_matches),
                 "gs_seen": len(gs_matches),
-                "asa_seen": len(asa_matches),
+                "ggs_seen": len(ggs_matches),
                 "matched": len(bindings),
                 "pending": len(pending_bindings),
                 "bindings": bindings,
@@ -250,6 +292,12 @@ class Collector:
         if today <= match_date < today + timedelta(days=self._upcoming_days):
             return True
         return _is_live_status(pm.get("status")) and match_date == today - timedelta(days=1)
+
+    def _ggs_time_window(self, now_dt: datetime) -> tuple[int, int]:
+        days = 2 if self._upcoming_days is None else max(2, int(self._upcoming_days))
+        start = now_dt - timedelta(days=1)
+        end = now_dt + timedelta(days=days + 1)
+        return int(start.timestamp()), int(end.timestamp())
 
     async def _run_loop(self) -> None:
         while self._running:
@@ -291,8 +339,8 @@ class Collector:
         pm = await self._store.get_json(f"pm:match:{guid}") or {}
         if not pm:
             raise ValueError("match not found")
-        selected_source = source if source in {"gs", "asa"} else self._external_source
-        if selected_source not in {"gs", "asa"}:
+        selected_source = source if source in {"gs", "ggs"} else self._external_source
+        if selected_source not in {"gs", "ggs"}:
             return []
         external_matches = await self._fetch_external_matches(selected_source, self._now_datetime())
         candidates = [
@@ -309,7 +357,7 @@ class Collector:
 
         if self._store is None:
             raise RuntimeError("Collector requires a store")
-        if source not in {"gs", "asa"}:
+        if source not in {"gs", "ggs"}:
             raise ValueError("unsupported external source")
         pm = await self._store.get_json(f"pm:match:{guid}") or {}
         if not pm:
@@ -327,9 +375,9 @@ class Collector:
             raise ValueError("external match not found")
         now = _utc_now()
         external = dict(external, guid=guid)
-        if source == "asa":
-            await self._write_asa(guid, external)
-            await self._write_asa_indices(guid, external)
+        if source == "ggs":
+            await self._write_ggs(guid, external)
+            await self._write_ggs_indices(guid, external)
         else:
             await self._write_gs(guid, external)
             await self._write_gs_indices(guid, external)
@@ -352,12 +400,13 @@ class Collector:
                 *[row for row in await self._gs_client.fetch_d1() if _sport(row) == "football"],
             ]
             return [_parse_gs_match(row, updated_at) for row in raw_rows]
-        if source == "asa":
-            raw_rows = [
-                *[row for row in await self._asa_client.fetch_home() if _sport(row) == "football"],
-                *[row for row in await self._asa_client.fetch_d1() if _sport(row) == "football"],
-            ]
-            return [_parse_asa_match(row, updated_at) for row in raw_rows]
+        if source == "ggs":
+            start_ts, end_ts = self._ggs_time_window(now_dt)
+            raw_rows = await self._ggs_client.fetch_match_list(
+                start_time_from=start_ts,
+                start_time_to=end_ts,
+            )
+            return [_parse_ggs_match(row, updated_at) for row in raw_rows]
         return []
 
     async def _publish_pm_snapshot(
@@ -378,9 +427,9 @@ class Collector:
         await self._store.set_json(f"gs:match:{guid}", gs, ttl_seconds=MATCH_STATE_TTL_SECONDS)
         await self._store.set_json(f"external:match:{guid}", gs, ttl_seconds=MATCH_STATE_TTL_SECONDS)
 
-    async def _write_asa(self, guid: str, asa: dict[str, Any]) -> None:
-        await self._store.set_json(f"asa:match:{guid}", asa, ttl_seconds=MATCH_STATE_TTL_SECONDS)
-        await self._store.set_json(f"external:match:{guid}", asa, ttl_seconds=MATCH_STATE_TTL_SECONDS)
+    async def _write_ggs(self, guid: str, ggs: dict[str, Any]) -> None:
+        await self._store.set_json(f"ggs:match:{guid}", ggs, ttl_seconds=MATCH_STATE_TTL_SECONDS)
+        await self._store.set_json(f"external:match:{guid}", ggs, ttl_seconds=MATCH_STATE_TTL_SECONDS)
 
     async def _write_pm_indices(self, guid: str, pm: dict[str, Any]) -> None:
         await self._store.set_text(f"idx:pm:event:{pm['pm_event_id']}", guid, ttl_seconds=MATCH_STATE_TTL_SECONDS)
@@ -402,7 +451,7 @@ class Collector:
 
         PM 会在比赛结束或市场状态变化后不再出现在当前采集列表里；如果这些比赛
         之前因为外部源未匹配而处于 pending，Collector 仍应在 3 天保留期内继续尝试
-        用 ASA/GS 绑定，避免错过赛中或完赛后的外部赛况。
+        用 GGS/GS 绑定，避免错过赛中或完赛后的外部赛况。
         """
 
         rows: list[dict[str, Any]] = []
@@ -428,13 +477,14 @@ class Collector:
             if value:
                 await self._store.set_text(f"{prefix}:{value}", guid, ttl_seconds=MATCH_STATE_TTL_SECONDS)
 
-    async def _write_asa_indices(self, guid: str, asa: dict[str, Any]) -> None:
+    async def _write_ggs_indices(self, guid: str, ggs: dict[str, Any]) -> None:
         for key, prefix in (
-            ("asa_match_id", "idx:asa:id"),
-            ("asa_pregame_id", "idx:asa:pregame"),
-            ("asa_inplay_id", "idx:asa:inplay"),
+            ("ggs_match_id", "idx:ggs:id"),
+            ("ggs_inplay_id", "idx:ggs:inplay"),
+            ("match_id", "idx:ggs:id"),
+            ("inplay_id", "idx:ggs:inplay"),
         ):
-            value = asa.get(key)
+            value = ggs.get(key)
             if value:
                 await self._store.set_text(f"{prefix}:{value}", guid, ttl_seconds=MATCH_STATE_TTL_SECONDS)
 
@@ -556,7 +606,7 @@ def _parse_gs_match(row: dict[str, Any], updated_at: str) -> dict[str, Any]:
     odds = row.get("odds") or {}
     return {
         "source": "gs",
-        "external_match_id": str(row.get("match_id") or ""),
+        "external_match_id": str(row.get("external_match_id") or row.get("match_id") or ""),
         "gs_match_id": str(row.get("match_id") or ""),
         "gs_pregame_id": str(row.get("pregame_id") or ""),
         "gs_inplay_id": str(row.get("inplay_id") or ""),
@@ -591,13 +641,12 @@ def _parse_gs_match(row: dict[str, Any], updated_at: str) -> dict[str, Any]:
     }
 
 
-def _parse_asa_match(row: dict[str, Any], updated_at: str) -> dict[str, Any]:
+def _parse_ggs_match(row: dict[str, Any], updated_at: str) -> dict[str, Any]:
     return {
-        "source": "asa",
+        "source": "ggs",
         "external_match_id": str(row.get("match_id") or ""),
-        "asa_match_id": str(row.get("match_id") or ""),
-        "asa_pregame_id": str(row.get("pregame_id") or row.get("match_id") or ""),
-        "asa_inplay_id": str(row.get("inplay_id") or row.get("match_id") or ""),
+        "ggs_match_id": str(row.get("match_id") or row.get("external_match_id") or ""),
+        "ggs_inplay_id": str(row.get("inplay_id") or row.get("match_id") or row.get("external_match_id") or ""),
         "league": row.get("league") or "",
         "home_team": row.get("home_team") or row.get("home") or "",
         "away_team": row.get("away_team") or row.get("away") or "",
@@ -683,7 +732,13 @@ def _candidate_row(pm: dict[str, Any], external: dict[str, Any]) -> dict[str, An
 
 
 def _external_match_id(row: dict[str, Any]) -> str:
-    return str(row.get("external_match_id") or row.get("gs_match_id") or row.get("asa_match_id") or "")
+    return str(
+        row.get("external_match_id")
+        or row.get("gs_match_id")
+        or row.get("ggs_match_id")
+        or row.get("match_id")
+        or ""
+    )
 
 
 def _binding(
@@ -705,11 +760,10 @@ def _binding(
         "gs_match_id": gs.get("gs_match_id") if gs else None,
         "gs_pregame_id": gs.get("gs_pregame_id") if gs else None,
         "gs_inplay_id": gs.get("gs_inplay_id") if gs else None,
+        "ggs_match_id": gs.get("ggs_match_id") if gs else None,
+        "ggs_inplay_id": gs.get("ggs_inplay_id") if gs else None,
         "external_source": gs.get("source") if gs else None,
         "external_match_id": _external_match_id(gs) if gs else None,
-        "asa_match_id": gs.get("asa_match_id") if gs else None,
-        "asa_pregame_id": gs.get("asa_pregame_id") if gs else None,
-        "asa_inplay_id": gs.get("asa_inplay_id") if gs else None,
         "confidence": confidence,
         "status": status,
         "created_at_utc": now,

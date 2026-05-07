@@ -2,15 +2,15 @@
 
 ## 目标
 
-用最少可维护代码实现 PM + GS/ASA + 足球 + Redis + 异步交易主链路。
+用最少可维护代码实现 PM + GS/GGS + 足球 + Redis + 异步交易主链路。
 
 ## Agent 分工
 
 本项目只使用 4 类 Agent。
 
 1. Project Manager Agent：控制目标、范围、进度、UI 一致性、代码层级和逻辑简洁性。
-2. Collector Agent：只做 PM/GS/ASA HTTP 采集和 PM 主导匹配。
-3. Listener Agent：只做 PM/GS/ASA WS 监听、过滤、标准化、入库、推送。
+2. Collector Agent：只做 PM/GS/GGS HTTP 采集和 PM 主导匹配。
+3. Listener Agent：只做 PM/GS/GGS WS 监听、过滤、标准化、入库、推送。
 4. Trader Agent：只做交易模块、交易员、策略 API、约束检查、模拟/真实交易、默认策略。
 
 不要再拆 Source/Matcher/Normalizer/API/QA 等额外常驻角色。需要测试和前端兼容时，由 Project Manager 分配到对应 Agent 的范围内完成。
@@ -62,34 +62,34 @@
 
 - 调 PM HTTP 采集足球比赛。
 - 调 GS `home` 和 `d1` 采集足球比赛。
-- 调 ASA HTTP 采集或查询近期足球比赛。
-- 以 PM 为基准匹配 GS/ASA。
+- 调 GGS HTTP 采集或查询近期足球比赛。
+- 以 PM 为基准匹配 GS/GGS。
 - 生成 `guid`。
-- 保存 PM 当前态、GS/ASA 当前态、binding。
+- 保存 PM 当前态、GS/GGS 当前态、binding。
 - TTL 3 天。
 
 任务：
 
 - 实现 PM HTTP client/parser/collector。
 - 实现 GS HTTP client/parser/collector。
-- 实现 ASA HTTP client/parser/collector。
+- 实现 GGS HTTP client/parser/collector。
 - 实现队名归一化。
 - 实现 PM 主导匹配。
 - 写 `pm:match:{guid}`。
 - 写 `gs:match:{guid}`。
-- 写 `asa:match:{guid}`。
+- 写 `ggs:match:{guid}`。
 - 写 `binding:{guid}`。
-- 写 PM/GS/ASA/guid 索引。
+- 写 PM/GS/GGS/guid 索引。
 - 写 collector run report。
 
 验收：
 
 - PM collector fixture test。
 - GS collector fixture test。
-- ASA collector fixture test。
+- GGS collector fixture test。
 - matcher test：直接匹配、队名+时间、pending。
 - TTL 3 天测试。
-- PM 和 GS/ASA 数据不互相覆盖。
+- PM 和 GS/GGS 数据不互相覆盖。
 
 ### 2.2 Listener Agent
 
@@ -99,13 +99,13 @@
 - 接 PM market WS。
 - 接 PM user WS。
 - 接 GS live WS。
-- 接 ASA live WS。
+- 接 GGS live WS。
 - 只保留系统当前存在的 `guid`。
 - 标准化实时字段。
 - 入 Redis。
 - 推送给前端。
 - PM market ticks 进入交易模块行情通道。
-- PM sports/GS/ASA 比赛数据进入判别器。
+- PM sports/GS/GGS 比赛数据进入判别器。
 - PM user 账号、订单、成交事件进入账号事件通道，按账号路由给对应交易员。
 
 任务：
@@ -114,7 +114,7 @@
 - 实现 PM market parser/listener，更新 moneyline ask1/bid1。
 - 实现 PM user parser/listener，更新用户账户、订单、成交并推送前端和对应交易员。
 - 实现 GS live parser/listener。
-- 实现 ASA live parser/listener。
+- 实现 GGS live parser/listener。
 - 实现 guid resolver。
 - 实现标准化字段：
   - received_at_utc。
@@ -134,7 +134,7 @@
   - 追加写入 ticks。
   - 推送前端。
   - 推送 Trader market tick 通道。
-- PM sports/GS/ASA 比赛数据标准化后立即：
+- PM sports/GS/GGS 比赛数据标准化后立即：
   - 写各自数据源当前态。
   - 推送前端。
   - 推送判别器。
@@ -149,8 +149,8 @@
 
 - parser fixture test。
 - unknown guid 不推送交易员。
-- PM 字段不被 GS/ASA 覆盖。
-- GS/ASA 字段不被 PM 覆盖。
+- PM 字段不被 GS/GGS 覆盖。
+- GS/GGS 字段不被 PM 覆盖。
 - Market WS 能更新 home/draw/away ask1/bid1。
 - User WS 能更新账户状态并推送前端。
 - PM market tick 不进入判别器。
@@ -178,8 +178,8 @@
 验收：
 
 - PM market tick 不会触发判别器。
-- ASA/GS 比分变化不会因为同场 PM market tick 高频进入而被丢弃。
-- `epl-eve-mac-2026-05-04` 这类 ASA 早于 PM 的事件，交易模块能看到“外部比分”和“当刻 PM 比分”的差异。
+- GGS/GS 比分变化不会因为同场 PM market tick 高频进入而被丢弃。
+- `epl-eve-mac-2026-05-04` 这类 GGS 早于 PM 的事件，交易模块能看到“外部比分”和“当刻 PM 比分”的差异。
 - 判别器不读写交易员账户、持仓、订单。
 
 ### 2.3 Trader Agent
@@ -212,7 +212,7 @@
   - 查询资产。
   - 查询持仓。
   - 查询余额。
-  - 查询 PM/GS/ASA 当前数据。
+  - 查询 PM/GS/GGS 当前数据。
 - 实现实盘 provider API：
   - 查询 provider 账户。
   - 查询 provider 持仓。
@@ -238,7 +238,7 @@
 
 默认策略验收：
 
-- GS/ASA 比分早于 PM base 时触发买入或加仓。
+- GS/GGS 比分早于 PM base 时触发买入或加仓。
 - 外部数据源扳平且 PM 还未扳平时，可以买入 Draw。
 - 新信号与当前持仓方向不一致时，先平仓，再按策略和通用参数判断是否反手。
 - 买入信号方向 ask1 > 0.93 时不建仓、不加仓。
@@ -299,9 +299,9 @@
 - 多个 PM 账户可配置、可监听，并能按 `account_alias` 路由到对应交易员。
 - 模拟交易至少跑通一场 fixture 或真实 live replay。
 - 前端 matches/detail/accounts/positions/trades/logs 都能读到真实后端数据。
-- PM/GS/ASA 通过 guid 唯一关联。
-- PM/GS/ASA 存储独立，互不覆盖。
-- Redis 中无 PM/GS/ASA 密钥、token、签名原文。
+- PM/GS/GGS 通过 guid 唯一关联。
+- PM/GS/GGS 存储独立，互不覆盖。
+- Redis 中无 PM/GS/GGS 密钥、token、签名原文。
 - dry-run 下不会提交真实订单。
 - 日志可定位 source、guid、trader_id、order_id。
 - 所有测试、lint、前端 build 通过。
@@ -313,7 +313,7 @@
 当前状态：
 
 - 已接通 PM market tick -> Trader `on_market_tick` 独立行情通道。
-- 已接通 PM sports/GS/ASA -> 判别器 -> Trader `on_match_signal` 独立比赛信号通道。
+- 已接通 PM sports/GS/GGS -> 判别器 -> Trader `on_match_signal` 独立比赛信号通道。
 - 已接通 PM user -> Trader `on_account_event` 独立账号事件通道。
 - 已删除比赛信号按 `guid` 合并/丢弃的逻辑。
 - 已保证 Collector 只采集、入库、推送前端，不再向 Trader 发送 `pm_http` 策略事件。
@@ -334,7 +334,7 @@
 任务：
 
 - PM market WS ticks 单独走行情通道。
-- PM sports、GS、ASA 比赛数据单独走比赛数据通道。
+- PM sports、GS、GGS 比赛数据单独走比赛数据通道。
 - 判别器输出 match signal。
 - Trader 接收独立行情和比赛入口：
   - `on_market_tick(event)`。
@@ -353,12 +353,12 @@
 
 验收：
 
-- 同一场比赛 PM market ticks 高频推送时，ASA/GS `SCORE_CHANGED` 仍能立即进入策略。
+- 同一场比赛 PM market ticks 高频推送时，GGS/GS `SCORE_CHANGED` 仍能立即进入策略。
 - tick 事件只触发最新行情更新和持仓回撤检查，不触发比分策略建仓。
 - match signal 只触发策略判断，不被 tick 队列阻塞。
 - account event 只同步实盘账号、订单、成交，不触发策略建仓。
 - 长期运行时广播缓存、tick 处理任务和交易员内存账本不会随推送数量无限增长。
-- `epl-eve-mac-2026-05-04` 重放时，04:27、04:32、04:40、04:42 的 ASA 早于 PM 信号都能被策略看到。
+- `epl-eve-mac-2026-05-04` 重放时，04:27、04:32、04:40、04:42 的 GGS 早于 PM 信号都能被策略看到。
 
 ### 4.2 交易模块通用函数
 
@@ -454,7 +454,7 @@
 
 验收：
 
-- ASA/GS 早于 PM 的比分信号不因为后续 PM 追上而失效。
+- GGS/GS 早于 PM 的比分信号不因为后续 PM 追上而失效。
 - PM 早于或等于外部数据源时不买入。
 - ask1 > 0.93 时不建仓、不加仓，但允许平仓。
 - 85 分钟后建仓/加仓金额减半。
@@ -464,7 +464,7 @@
 新增测试：
 
 - PM tick 不进入判别器。
-- ASA/GS score signal 不被 tick 队列按 `guid` 丢弃。
+- GGS/GS score signal 不被 tick 队列按 `guid` 丢弃。
 - 同一 `guid` 下 tick 和 score signal 同时到达时，score signal 在 1 秒内进入策略。
 - account event 与 tick、score signal 并发到达时，按账号路由，不阻塞策略。
 - 交易员回撤强平按最高 ask1 的绝对回落值触发。
@@ -483,7 +483,7 @@
 ```text
 请阅读 pdt2.1/README.md、pdt2.1/AGENT.MD、pdt2.1/02-requirements.md、pdt2.1/03-system-design.md、pdt2.1/04-redis-data-design.md、pdt2.1/05-development-plan.md，并复制 pdt2.1/frontend-snapshot/ 作为新项目 front/。
 
-执行 PDT2.1 第一轮：搭 Python + Redis + FastAPI + 原前端复制 + 最小 runtime + 空 API + WebSocket heartbeat。不要实现真实 PM/GS/ASA 连接，不要做真实下单。完成后运行测试并汇报。
+执行 PDT2.1 第一轮：搭 Python + Redis + FastAPI + 原前端复制 + 最小 runtime + 空 API + WebSocket heartbeat。不要实现真实 PM/GS/GGS 连接，不要做真实下单。完成后运行测试并汇报。
 ```
 
 ### 第二轮
@@ -491,7 +491,7 @@
 ```text
 请阅读 pdt2.1/05-development-plan.md 的第二轮。
 
-执行 PDT2.1 第二轮：允许使用多 Agent，但只使用 Project Manager、Collector、Listener、Trader 四类角色。Collector 只做 PM/GS/ASA HTTP 采集和 guid 匹配；Listener 只做 PM/GS/ASA WS、过滤、标准化、入库和推送；判别器只做比赛数据变化检测；Trader 只做交易模块、交易员、策略 API、约束检查、模拟/真实 dry-run 和默认比分时差策略。不要接 KS/TRD/篮球/PG，不要提交真实订单。
+执行 PDT2.1 第二轮：允许使用多 Agent，但只使用 Project Manager、Collector、Listener、Trader 四类角色。Collector 只做 PM/GS/GGS HTTP 采集和 guid 匹配；Listener 只做 PM/GS/GGS WS、过滤、标准化、入库和推送；判别器只做比赛数据变化检测；Trader 只做交易模块、交易员、策略 API、约束检查、模拟/真实 dry-run 和默认比分时差策略。不要接 KS/TRD/篮球/PG，不要提交真实订单。
 ```
 
 ### 第三轮
@@ -499,5 +499,5 @@
 ```text
 请阅读 pdt2.1/05-development-plan.md 的第三轮。
 
-执行 PDT2.1 第三轮：做完整链路集成、前端联调、Redis TTL/retention、日志脱敏、PM/GS/ASA connectivity check、dry-run soak test 和测试修复。真实交易仍默认 dry-run；只有我单独明确授权后，才允许考虑小额真实订单。
+执行 PDT2.1 第三轮：做完整链路集成、前端联调、Redis TTL/retention、日志脱敏、PM/GS/GGS connectivity check、dry-run soak test 和测试修复。真实交易仍默认 dry-run；只有我单独明确授权后，才允许考虑小额真实订单。
 ```
